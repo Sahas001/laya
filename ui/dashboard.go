@@ -39,15 +39,26 @@ func renderVolumeBar(vol float64, width int) string {
 }
 
 func (m *Model) viewDashboard(styles Styles) string {
+	boxWidth := 56
+	if m.width > 0 && m.width < boxWidth+6 {
+		boxWidth = m.width - 6
+		if boxWidth < 26 {
+			boxWidth = 26
+		}
+	}
+	contentWidth := boxWidth - 6
+
 	var sb strings.Builder
 
 	// 1. Header (Application Name & Selected Player)
-	headerText := styles.Header.Render("LAYA")
+	headerText := styles.Header.Margin(0).Render(" L A Y A ")
+	centeredHeader := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(headerText)
+	sb.WriteString(centeredHeader)
+	sb.WriteString("\n")
+
 	playerText := styles.PlayerName.Render(fmt.Sprintf("● %s", m.activePlayerName))
-	
-	// Right align player name based on model width
-	headerRow := lipgloss.JoinHorizontal(lipgloss.Center, headerText, "  ", playerText)
-	sb.WriteString(headerRow)
+	centeredPlayer := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(playerText)
+	sb.WriteString(centeredPlayer)
 	sb.WriteString("\n\n")
 
 	// 2. Main content area (either Track Details or Lyrics)
@@ -60,15 +71,19 @@ func (m *Model) viewDashboard(styles Styles) string {
 		}
 		
 		lyricHeader := fmt.Sprintf("󰎆 Lyrics: %s - %s", title, artist)
-		sb.WriteString(styles.LyricsTitle.Render(lyricHeader))
+		lyricHeaderStyle := styles.LyricsTitle.Width(contentWidth).Align(lipgloss.Center)
+		sb.WriteString(lyricHeaderStyle.Render(lyricHeader))
 		sb.WriteString("\n\n")
 
 		if !m.lyricsLoaded {
+			var loadingStr string
 			if m.lyricsErr != nil {
-				sb.WriteString(styles.LyricsError.Render(fmt.Sprintf("Error: %v", m.lyricsErr)))
+				loadingStr = styles.LyricsError.Render(fmt.Sprintf("Error: %v", m.lyricsErr))
 			} else {
-				sb.WriteString(styles.LyricsLoading.Render("Loading lyrics from LRCLIB..."))
+				loadingStr = styles.LyricsLoading.Render("Loading lyrics from LRCLIB...")
 			}
+			centeredLoading := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(loadingStr)
+			sb.WriteString(centeredLoading)
 		} else {
 			sb.WriteString(m.viewport.View())
 		}
@@ -85,7 +100,7 @@ func (m *Model) viewDashboard(styles Styles) string {
 			album = ""
 		}
 
-		// Track Info Card
+		// Track Info Card (wrapped to fit contentWidth)
 		var cardSb strings.Builder
 		cardSb.WriteString(styles.SongTitle.Render(title))
 		cardSb.WriteString("\n")
@@ -97,7 +112,8 @@ func (m *Model) viewDashboard(styles Styles) string {
 			cardSb.WriteString(styles.Album.Render("󰀥  " + album))
 			cardSb.WriteString("\n")
 		}
-		sb.WriteString(styles.TrackCard.Render(cardSb.String()))
+		trackCardStyle := styles.TrackCard.Width(contentWidth - 2)
+		sb.WriteString(trackCardStyle.Render(cardSb.String()))
 		sb.WriteString("\n")
 
 		// 3. Progress Bar Row
@@ -122,10 +138,10 @@ func (m *Model) viewDashboard(styles Styles) string {
 			}
 		}
 
-		// Progress bar width adjusted based on terminal width
-		progWidth := m.width - 24
-		if progWidth < 10 {
-			progWidth = 10
+		// Progress bar width adjusted based on contentWidth
+		progWidth := contentWidth - len(posStr) - len(durStr) - 4
+		if progWidth < 6 {
+			progWidth = 6
 		}
 		m.progressBar.Width = progWidth
 		progressBarStr := m.progressBar.ViewAs(percent)
@@ -135,7 +151,8 @@ func (m *Model) viewDashboard(styles Styles) string {
 			progressBarStr,
 			styles.ProgressTime.Render(durStr),
 		)
-		sb.WriteString(progRow)
+		centeredProg := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(progRow)
+		sb.WriteString(centeredProg)
 		sb.WriteString("\n\n")
 
 		// 4. Status Bar & Volume Row
@@ -151,15 +168,20 @@ func (m *Model) viewDashboard(styles Styles) string {
 
 		volPercent := m.playerState.Volume
 		volStr := fmt.Sprintf("󰕾 %3d%% ", int(volPercent*100))
-		volBar := renderVolumeBar(volPercent, 10)
+		volBarWidth := 10
+		if contentWidth < 40 {
+			volBarWidth = 5
+		}
+		volBar := renderVolumeBar(volPercent, volBarWidth)
 		volRow := fmt.Sprintf("%s%s", 
 			styles.VolumeLabel.Render(volStr),
 			styles.VolumeValue.Render(volBar),
 		)
 
 		// Join status and volume side-by-side with padding
-		statusBar := lipgloss.JoinHorizontal(lipgloss.Center, statusBadge, "      ", volRow)
-		sb.WriteString(statusBar)
+		statusBar := lipgloss.JoinHorizontal(lipgloss.Center, statusBadge, "    ", volRow)
+		centeredStatus := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(statusBar)
+		sb.WriteString(centeredStatus)
 		sb.WriteString("\n")
 	}
 
@@ -167,11 +189,13 @@ func (m *Model) viewDashboard(styles Styles) string {
 	sb.WriteString("\n")
 	var helpKeys string
 	if m.showLyrics {
-		helpKeys = "j/k: scroll lyrics  •  space: play/pause  •  l: close lyrics  •  q: quit"
+		helpKeys = "j/k: scroll  •  space: play/pause  •  [ and ]: seek  •  H/L: cycle players  •  l/esc: close lyrics"
 	} else {
-		helpKeys = "space: play/pause  •  n: next  •  p: prev  •  ↑/↓: vol  •  l: lyrics  •  s: select player  •  q: quit"
+		helpKeys = "space: play/pause  •  [ and ]: seek  •  H/L: cycle players  •  l: lyrics  •  s: select player"
 	}
-	sb.WriteString(styles.HelpText.Render(helpKeys))
+	wrappedHelp := styles.HelpText.Width(contentWidth).Align(lipgloss.Center).Render(helpKeys)
+	sb.WriteString(wrappedHelp)
 
-	return styles.Container.Render(sb.String())
+	containerStyle := styles.Container.Width(boxWidth)
+	return containerStyle.Render(sb.String())
 }

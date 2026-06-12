@@ -59,6 +59,8 @@ type Model struct {
 	isSynced     bool
 	lastManualScroll time.Time
 
+	styles       Styles
+
 	// Interpolation for smooth progress bar
 	interpolatedPos time.Duration
 	lastStateUpdate time.Time
@@ -84,6 +86,7 @@ func NewModel() (*Model, error) {
 		progressBar:  prog,
 		viewport:     vp,
 		currentView: ViewSelectPlayer,
+		styles:       DefaultStyles(),
 	}, nil
 }
 
@@ -149,7 +152,7 @@ func (m *Model) updateLyricsView() {
 		return
 	}
 
-	styles := DefaultStyles()
+	styles := m.styles
 	var sb strings.Builder
 
 	activeIndex := -1
@@ -172,7 +175,7 @@ func (m *Model) updateLyricsView() {
 		} else {
 			// Normal line (or dimmed if synced is active)
 			if m.isSynced {
-				sb.WriteString(styles.HelpText.Render("  " + line.Text))
+				sb.WriteString(styles.InactiveLyric.Render("  " + line.Text))
 			} else {
 				sb.WriteString("  " + line.Text)
 			}
@@ -215,20 +218,97 @@ func (m *Model) updateState() tea.Cmd {
 		m.activePlayerName = ""
 		return m.refreshPlayersCmd()
 	}
+
+	var cmds []tea.Cmd
+
+	// Track change detection
+	trackChanged := state.Metadata.Title != m.playerState.Metadata.Title || state.Metadata.Artist != m.playerState.Metadata.Artist
+	if trackChanged {
+		// Reset lyrics state to avoid showing stale lyrics
+		m.lyricsLoaded = false
+		m.lyricsErr = nil
+		m.lyricsLines = nil
+		m.isSynced = false
+		m.lyricsSongID = "" // clear it to force a reload when toggled
+
+		// Asynchronously extract colors from new album art
+		if state.Metadata.ArtURL != "" {
+			cmds = append(cmds, ExtractColorsCmd(state.Metadata.ArtURL))
+		}
+		
+		// If lyrics view is active, trigger lyrics fetch immediately
+		if m.showLyrics {
+			m.lyricsSongID = songKey(state.Metadata.Artist, state.Metadata.Title)
+			cmds = append(cmds, FetchLyricsCmd(
+				m.lyricsSongID,
+				state.Metadata.Artist,
+				state.Metadata.Title,
+				state.Metadata.Album,
+				state.Metadata.URL,
+				state.Metadata.Length,
+			))
+		}
+	} else if m.showLyrics && songKey(state.Metadata.Artist, state.Metadata.Title) != m.lyricsSongID {
+		// Fallback check if lyrics view was just toggled
+		m.lyricsLoaded = false
+		m.lyricsErr = nil
+		m.lyricsSongID = songKey(state.Metadata.Artist, state.Metadata.Title)
+		cmds = append(cmds, FetchLyricsCmd(
+			m.lyricsSongID,
+			state.Metadata.Artist,
+			state.Metadata.Title,
+			state.Metadata.Album,
+			state.Metadata.URL,
+			state.Metadata.Length,
+		))
+	}
+
 	m.playerState = state
 	m.lastStateUpdate = time.Now()
 	m.interpolatedPos = state.Position
 
-	// Trigger lyrics fetch if track changed
-	key := songKey(state.Metadata.Artist, state.Metadata.Title)
-	if m.showLyrics && key != m.lyricsSongID {
-		m.lyricsLoaded = false
-		m.lyricsErr = nil
-		m.lyricsSongID = key
-		return FetchLyricsCmd(state.Metadata.Artist, state.Metadata.Title, state.Metadata.Album, state.Metadata.Length)
+	return tea.Batch(cmds...)
+}
+
+func (m *Model) cyclePlayer(forward bool) tea.Cmd {
+	names, err := mpris.ListPlayers(m.dbusConn)
+	if err != nil || len(names) <= 1 {
+		return nil
 	}
 
-	return nil
+	var infos []PlayerInfo
+	currentIdx := -1
+	for i, name := range names {
+		identity, _ := mpris.GetPlayerIdentity(m.dbusConn, name)
+		infos = append(infos, PlayerInfo{
+			BusName:  name,
+			Identity: identity,
+		})
+		if m.player != nil && name == m.player.BusName() {
+			currentIdx = i
+		}
+	}
+
+	if len(infos) == 0 {
+		return nil
+	}
+
+	var nextIdx int
+	if currentIdx == -1 {
+		nextIdx = 0
+	} else {
+		if forward {
+			nextIdx = (currentIdx + 1) % len(infos)
+		} else {
+			nextIdx = (currentIdx - 1 + len(infos)) % len(infos)
+		}
+	}
+
+	selected := infos[nextIdx]
+	m.player = mpris.NewPlayer(m.dbusConn, selected.BusName)
+	m.activePlayerName = selected.Identity
+	m.currentView = ViewDashboard
+	return m.updateState()
 }
 
 // Update handles messages and updates the state.
@@ -301,6 +381,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						_ = m.player.SetVolume(m.playerState.Volume - 0.05)
 						cmds = append(cmds, m.updateState())
 					}
+				case "[":
+					if m.player != nil {
+						_ = m.player.Seek(-5000000)
+						cmds = append(cmds, m.updateState())
+					}
+				case "]":
+					if m.player != nil {
+						_ = m.player.Seek(5000000)
+						cmds = append(cmds, m.updateState())
+					}
+				case "H":
+					cmds = append(cmds, m.cyclePlayer(false))
+				case "L":
+					cmds = append(cmds, m.cyclePlayer(true))
 				case "up", "down", "j", "k", "pgup", "pgdown":
 					m.lastManualScroll = time.Now()
 					var vpCmd tea.Cmd
@@ -330,30 +424,45 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						_ = m.player.Previous()
 						cmds = append(cmds, m.updateState())
 					}
-				case "up", "k", "+", "=":
+				case "up", "+", "=":
 					if m.player != nil {
 						_ = m.player.SetVolume(m.playerState.Volume + 0.05)
 						cmds = append(cmds, m.updateState())
 					}
-				case "down", "j", "-":
+				case "down", "-":
 					if m.player != nil {
 						_ = m.player.SetVolume(m.playerState.Volume - 0.05)
 						cmds = append(cmds, m.updateState())
 					}
+				case "[":
+					if m.player != nil {
+						_ = m.player.Seek(-5000000)
+						cmds = append(cmds, m.updateState())
+					}
+				case "]":
+					if m.player != nil {
+						_ = m.player.Seek(5000000)
+						cmds = append(cmds, m.updateState())
+					}
 				case "l":
-					m.showLyrics = true
-					key := songKey(m.playerState.Metadata.Artist, m.playerState.Metadata.Title)
-					if key != m.lyricsSongID || !m.lyricsLoaded {
+					m.showLyrics = !m.showLyrics
+					if m.showLyrics && (songKey(m.playerState.Metadata.Artist, m.playerState.Metadata.Title) != m.lyricsSongID || !m.lyricsLoaded) {
 						m.lyricsLoaded = false
 						m.lyricsErr = nil
-						m.lyricsSongID = key
+						m.lyricsSongID = songKey(m.playerState.Metadata.Artist, m.playerState.Metadata.Title)
 						cmds = append(cmds, FetchLyricsCmd(
+							m.lyricsSongID,
 							m.playerState.Metadata.Artist,
 							m.playerState.Metadata.Title,
 							m.playerState.Metadata.Album,
+							m.playerState.Metadata.URL,
 							m.playerState.Metadata.Length,
 						))
 					}
+				case "H":
+					cmds = append(cmds, m.cyclePlayer(false))
+				case "L":
+					cmds = append(cmds, m.cyclePlayer(true))
 				case "s":
 					m.currentView = ViewSelectPlayer
 					cmds = append(cmds, m.refreshPlayersCmd())
@@ -406,7 +515,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selectedIdx = 0
 		}
 
+	case ThemeUpdateMsg:
+		m.UpdateThemeStyles(msg.Colors)
+
 	case LyricsMsg:
+		if msg.SongID != m.lyricsSongID {
+			return m, nil
+		}
 		if msg.Err != nil {
 			m.lyricsLoaded = false
 			m.lyricsErr = msg.Err
@@ -457,14 +572,18 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the TUI screen.
 func (m *Model) View() string {
-	styles := DefaultStyles()
-	
+	var content string
 	switch m.currentView {
 	case ViewSelectPlayer:
-		return m.viewSelectPlayer(styles)
+		content = m.viewSelectPlayer(m.styles)
 	case ViewDashboard:
-		return m.viewDashboard(styles)
+		content = m.viewDashboard(m.styles)
 	default:
-		return "Laya TUI: Unknown View State"
+		content = "Laya TUI: Unknown View State"
 	}
+
+	if m.width > 0 && m.height > 0 {
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+	}
+	return content
 }

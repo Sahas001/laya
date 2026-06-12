@@ -24,6 +24,7 @@ type TrackMetadata struct {
 	Artist      string // Artist name(s) joined
 	Title       string
 	AlbumArtist string // Album Artist name(s) joined
+	URL         string // track URL (xesam:url)
 }
 
 // PlayerState holds the state of the player at a point in time.
@@ -46,6 +47,11 @@ func NewPlayer(conn *dbus.Conn, busName string) *Player {
 		busName:    busName,
 		dbusObject: conn.Object(busName, "/org/mpris/MediaPlayer2"),
 	}
+}
+
+// BusName returns the player's D-Bus bus name.
+func (p *Player) BusName() string {
+	return p.busName
 }
 
 // ListPlayers scans the D-Bus session bus and returns list of player bus names.
@@ -187,6 +193,11 @@ func (p *Player) GetState() (PlayerState, error) {
 					meta.Album = album
 				}
 			}
+			if urlVal, ok := metaMap["xesam:url"]; ok {
+				if trackURL, ok := urlVal.Value().(string); ok {
+					meta.URL = trackURL
+				}
+			}
 			if artistVal, ok := metaMap["xesam:artist"]; ok {
 				switch a := artistVal.Value().(type) {
 				case []string:
@@ -234,4 +245,9 @@ func (p *Player) GetState() (PlayerState, error) {
 	}
 
 	return state, nil
+}
+
+// Seek seeks by offset in microseconds.
+func (p *Player) Seek(offset int64) error {
+	return p.dbusObject.Call("org.mpris.MediaPlayer2.Player.Seek", 0, offset).Store()
 }

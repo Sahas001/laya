@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -14,6 +15,7 @@ import (
 
 // LyricsMsg is sent when lyrics fetch finishes
 type LyricsMsg struct {
+	SongID       string
 	PlainLyrics  string
 	SyncedLyrics string
 	Err          error
@@ -38,17 +40,55 @@ type LyricResponse struct {
 }
 
 // FetchLyricsCmd returns a tea.Cmd to fetch lyrics in the background
-func FetchLyricsCmd(artist, title, album string, duration time.Duration) tea.Cmd {
+func FetchLyricsCmd(songID, artist, title, album, trackURL string, duration time.Duration) tea.Cmd {
 	return func() tea.Msg {
-		plain, synced, err := fetchLyrics(artist, title, album, duration)
-		return LyricsMsg{PlainLyrics: plain, SyncedLyrics: synced, Err: err}
+		plain, synced, err := fetchLyrics(artist, title, album, trackURL, duration)
+		return LyricsMsg{SongID: songID, PlainLyrics: plain, SyncedLyrics: synced, Err: err}
 	}
 }
 
-func fetchLyrics(artist, title, album string, duration time.Duration) (string, string, error) {
+func findLocalLrc(trackURL string) (string, error) {
+	if !strings.HasPrefix(trackURL, "file://") {
+		return "", fmt.Errorf("not a local file URL")
+	}
+	path := strings.TrimPrefix(trackURL, "file://")
+	// Unescape path (e.g. %20 -> space)
+	unescaped, err := url.QueryUnescape(path)
+	if err == nil {
+		path = unescaped
+	}
+
+	// Change extension to .lrc
+	lastDot := strings.LastIndex(path, ".")
+	if lastDot == -1 {
+		return "", fmt.Errorf("no extension found in path")
+	}
+	lrcPath := path[:lastDot] + ".lrc"
+
+	if _, err := os.Stat(lrcPath); err != nil {
+		return "", err
+	}
+
+	content, err := os.ReadFile(lrcPath)
+	if err != nil {
+		return "", err
+	}
+	return string(content), nil
+}
+
+func fetchLyrics(artist, title, album, trackURL string, duration time.Duration) (string, string, error) {
 	artist = strings.TrimSpace(artist)
 	title = strings.TrimSpace(title)
 	album = strings.TrimSpace(album)
+
+	// Stage 0: Try local .lrc file
+	if trackURL != "" {
+		localLrc, err := findLocalLrc(trackURL)
+		if err == nil && localLrc != "" {
+			return "", localLrc, nil
+		}
+	}
+
 	if artist == "" || title == "" {
 		return "", "", fmt.Errorf("artist and track title are required to find lyrics")
 	}

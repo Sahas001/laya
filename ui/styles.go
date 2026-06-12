@@ -45,6 +45,7 @@ type Styles struct {
 	LyricsError    lipgloss.Style
 	LyricsLoading  lipgloss.Style
 	ActiveLyric    lipgloss.Style
+	InactiveLyric  lipgloss.Style
 	TrackCard      lipgloss.Style
 }
 
@@ -153,6 +154,9 @@ func DefaultStyles() Styles {
 	s.ActiveLyric = lipgloss.NewStyle().
 		Bold(true).
 		Foreground(lipgloss.Color(ColorGreen))
+
+	s.InactiveLyric = lipgloss.NewStyle().
+		Foreground(lipgloss.Color(ColorOverlay))
 
 	return s
 }

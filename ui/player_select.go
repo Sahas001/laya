@@ -2,6 +2,8 @@ package ui
 
 import (
 	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // PlayerInfo holds both the D-Bus bus name and its human-readable identity
@@ -11,17 +13,39 @@ type PlayerInfo struct {
 }
 
 func (m *Model) viewSelectPlayer(styles Styles) string {
+	boxWidth := 56
+	if m.width > 0 && m.width < boxWidth+6 {
+		boxWidth = m.width - 6
+		if boxWidth < 26 {
+			boxWidth = 26
+		}
+	}
+	contentWidth := boxWidth - 6
+
 	var sb strings.Builder
 
-	sb.WriteString(styles.SelectTitle.Render("⚡ Select Media Player to Control"))
+	titleStr := "⚡ Select Media Player"
+	centeredTitle := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Bold(true).Render(titleStr)
+	sb.WriteString(styles.SelectTitle.Width(contentWidth).Align(lipgloss.Center).Render(centeredTitle))
 	sb.WriteString("\n\n")
 
 	if len(m.players) == 0 {
-		sb.WriteString(styles.LyricsError.Render("No active media players detected."))
-		sb.WriteString("\n\nEnsure a player (e.g. mpv, Spotify, Firefox, Tauon) is open\nand playing media, then press 'r' to refresh.\n")
-		sb.WriteString("\n")
-		sb.WriteString(styles.HelpText.Render("r: refresh  •  q: quit"))
-		return styles.Container.Render(sb.String())
+		errorStr := "No active media players detected."
+		centeredError := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(errorStr)
+		sb.WriteString(styles.LyricsError.Width(contentWidth).Align(lipgloss.Center).Render(centeredError))
+		sb.WriteString("\n\n")
+		
+		descStr := "Ensure a player (e.g. mpv, Spotify, Firefox, Tauon) is open and playing media, then press 'r' to refresh."
+		centeredDesc := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(descStr)
+		sb.WriteString(styles.HelpText.Width(contentWidth).Align(lipgloss.Center).Render(centeredDesc))
+		sb.WriteString("\n\n")
+		
+		helpKeys := "r: refresh  •  q: quit"
+		wrappedHelp := styles.HelpText.Width(contentWidth).Align(lipgloss.Center).Render(helpKeys)
+		sb.WriteString(wrappedHelp)
+		
+		containerStyle := styles.Container.Width(boxWidth)
+		return containerStyle.Render(sb.String())
 	}
 
 	for i, player := range m.players {
@@ -32,19 +56,26 @@ func (m *Model) viewSelectPlayer(styles Styles) string {
 			name = parts[len(parts)-1]
 		}
 
+		var line string
 		if i == m.selectedIdx {
-			sb.WriteString(styles.SelectActive.Render(name))
+			line = styles.SelectActive.Render(name)
 		} else {
-			sb.WriteString(styles.SelectInactive.Render(name))
+			line = styles.SelectInactive.Render(name)
 		}
+		// Center each player name line
+		centeredLine := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(line)
+		sb.WriteString(centeredLine)
 		sb.WriteString("\n")
 	}
 
 	sb.WriteString("\n")
-	sb.WriteString(styles.HelpText.Render("↑/↓ or j/k: navigate  •  enter: select  •  r: refresh  •  q: quit"))
+	helpKeys := "↑/↓ or j/k: navigate  •  enter: select  •  r: refresh  •  q: quit"
 	if m.player != nil {
-		sb.WriteString(styles.HelpText.Render("  •  esc: cancel"))
+		helpKeys += "  •  esc: cancel"
 	}
+	wrappedHelp := styles.HelpText.Width(contentWidth).Align(lipgloss.Center).Render(helpKeys)
+	sb.WriteString(wrappedHelp)
 
-	return styles.Container.Render(sb.String())
+	containerStyle := styles.Container.Width(boxWidth)
+	return containerStyle.Render(sb.String())
 }
