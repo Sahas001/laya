@@ -114,6 +114,7 @@ func fetchLyrics(artist, title, album, trackURL string, duration time.Duration) 
 					if result.Instrumental {
 						return "", "", fmt.Errorf("instrumental track")
 					}
+					saveLocalLrc(trackURL, result.PlainLyrics, result.SyncedLyrics)
 					return result.PlainLyrics, result.SyncedLyrics, nil
 				}
 				resp.Body.Close()
@@ -156,7 +157,35 @@ func fetchLyrics(artist, title, album, trackURL string, duration time.Duration) 
 	if best.Instrumental {
 		return "", "", fmt.Errorf("instrumental track")
 	}
+	saveLocalLrc(trackURL, best.PlainLyrics, best.SyncedLyrics)
 	return best.PlainLyrics, best.SyncedLyrics, nil
+}
+
+func saveLocalLrc(trackURL, plain, synced string) {
+	if trackURL == "" || !strings.HasPrefix(trackURL, "file://") {
+		return
+	}
+	path := strings.TrimPrefix(trackURL, "file://")
+	unescaped, err := url.QueryUnescape(path)
+	if err == nil {
+		path = unescaped
+	}
+	lastDot := strings.LastIndex(path, ".")
+	if lastDot == -1 {
+		return
+	}
+	lrcPath := path[:lastDot] + ".lrc"
+
+	// Prefer synced lyrics
+	content := synced
+	if content == "" {
+		content = plain
+	}
+	if content == "" {
+		return
+	}
+
+	_ = os.WriteFile(lrcPath, []byte(content), 0644)
 }
 
 // ParseSyncedLrc parses LRC synced lyrics into a structured slice of LyricLines sorted chronologically
