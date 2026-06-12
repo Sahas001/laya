@@ -1,3 +1,9 @@
 laya-tui
-.gitignore
-.git
+laya-tui.exe
+*.exe
+
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.local
