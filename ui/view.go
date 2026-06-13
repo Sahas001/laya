@@ -493,8 +493,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.height = msg.Height
 		
 		// Resize viewport for lyrics view. Height budget:
-		// Total Height - (Header 3 + Lyric Header 3 + Footer 3 + Pad 3) = -12
-		vpHeight := msg.Height - 12
+		// Total Height - (Header 4 + Lyric Header 3 + Footer 2 + Container Border/Pad 4 + Top Margin 2) = 15
+		vpHeight := msg.Height - 15
 		if vpHeight < 5 {
 			vpHeight = 5
 		}
@@ -594,7 +594,27 @@ func (m *Model) View() string {
 	}
 
 	if m.width > 0 && m.height > 0 {
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, content)
+		hAlign := lipgloss.Center
+		vAlign := lipgloss.Center
+
+		if lipgloss.Height(content) >= m.height {
+			vAlign = lipgloss.Top
+			content = "\n\n" + content
+			content = truncateHeight(content, m.height)
+		}
+		if lipgloss.Width(content) > m.width {
+			hAlign = lipgloss.Left
+		}
+
+		return lipgloss.Place(m.width, m.height, hAlign, vAlign, content)
 	}
 	return content
+}
+
+func truncateHeight(content string, maxHeight int) string {
+	lines := strings.Split(content, "\n")
+	if len(lines) <= maxHeight {
+		return content
+	}
+	return strings.Join(lines[:maxHeight], "\n")
 }

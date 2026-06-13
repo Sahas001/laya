@@ -2,6 +2,19 @@
 
 LAYA is a terminal-based MPRIS media controller and "now playing" dashboard for Linux. Built in Go using Bubble Tea, it interacts with running players (like `mpv`, `spotify`, `tauon`, `firefox`, or `vlc`) over the D-Bus session bus.
 
+## Preview
+
+### Dashboard with Wave Visualizer
+![Dashboard View](public/laya_player.png)
+
+### Synced Lyrics & Player Selection
+| Synced Lyrics | Player Selection |
+| --- | --- |
+| ![Lyrics View](public/laya_lyrics.png) | ![Player Selection](public/lay_select_media_player.png) |
+
+### Mini Player (Responsive Layout)
+![Mini Player](public/laya_player_mini.png)
+
 ## Features
 
 - **Adaptive Themes**: Dynamic color extraction from album art (`mpris:artUrl`) via K-means clustering to theme the UI borders and highlights.

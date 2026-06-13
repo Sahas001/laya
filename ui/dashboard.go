@@ -121,7 +121,7 @@ func (m *Model) viewDashboard(styles Styles) string {
 			if cardWidth < 15 {
 				cardWidth = 15
 			}
-			trackCardStyle := styles.TrackCard.Width(cardWidth).MarginTop(1)
+			trackCardStyle := styles.TrackCard.Width(cardWidth)
 			trackCard := trackCardStyle.Render(cardSb.String())
 			visualizerView := m.getVisualizerView(styles)
 			mainContent = lipgloss.JoinHorizontal(lipgloss.Top, trackCard, "   ", visualizerView)

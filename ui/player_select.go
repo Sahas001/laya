@@ -24,6 +24,12 @@ func (m *Model) viewSelectPlayer(styles Styles) string {
 
 	var sb strings.Builder
 
+	// Header (Application Name)
+	headerText := styles.Header.Margin(0).Render(" L A Y A ")
+	centeredHeader := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(headerText)
+	sb.WriteString(centeredHeader)
+	sb.WriteString("\n\n")
+
 	titleStr := "⚡ Select Media Player"
 	centeredTitle := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Bold(true).Render(titleStr)
 	sb.WriteString(styles.SelectTitle.Width(contentWidth).Align(lipgloss.Center).Render(centeredTitle))
