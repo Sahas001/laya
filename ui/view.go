@@ -65,6 +65,9 @@ type Model struct {
 	// Interpolation for smooth progress bar
 	interpolatedPos time.Duration
 	lastStateUpdate time.Time
+
+	// Record player animation
+	recordFrame     int
 }
 
 // NewModel initializes the Bubble Tea model.
@@ -562,6 +565,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.showLyrics && m.lyricsLoaded {
 				m.updateLyricsView()
 			}
+
+			// Advance animation frame for the wave visualizer
+			m.recordFrame = (m.recordFrame + 1) % 24
 		}
 		cmds = append(cmds, tickCmd())
 

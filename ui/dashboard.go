@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -112,8 +113,24 @@ func (m *Model) viewDashboard(styles Styles) string {
 			cardSb.WriteString(styles.Album.Render("󰀥  " + album))
 			cardSb.WriteString("\n")
 		}
-		trackCardStyle := styles.TrackCard.Width(contentWidth - 2)
-		sb.WriteString(trackCardStyle.Render(cardSb.String()))
+
+		var mainContent string
+		if contentWidth >= 40 {
+			// Show both track card and wave visualizer side-by-side
+			cardWidth := contentWidth - 23
+			if cardWidth < 15 {
+				cardWidth = 15
+			}
+			trackCardStyle := styles.TrackCard.Width(cardWidth).MarginTop(1)
+			trackCard := trackCardStyle.Render(cardSb.String())
+			visualizerView := m.getVisualizerView(styles)
+			mainContent = lipgloss.JoinHorizontal(lipgloss.Top, trackCard, "   ", visualizerView)
+		} else {
+			// Small screen: show track card only
+			trackCardStyle := styles.TrackCard.Width(contentWidth - 2)
+			mainContent = trackCardStyle.Render(cardSb.String())
+		}
+		sb.WriteString(mainContent)
 		sb.WriteString("\n")
 
 		// 3. Progress Bar Row
@@ -193,11 +210,95 @@ func (m *Model) viewDashboard(styles Styles) string {
 	} else if m.showLyrics {
 		helpKeys = "j/k: scroll  •  space: play/pause  •  [ and ]: seek  •  H/L: cycle players  •  l/esc: close lyrics  •  h: hide/help"
 	} else {
-		helpKeys = "space: play/pause  •  [ and ]: seek  •  H/L: cycle players  •  l: lyrics  •  s: select player  •  h: hide help"
+		helpKeys = "space: play/pause  •  [/]: seek  •  H/L: cycle players  •  l: lyrics  •  s: select player  •  h: hide help"
 	}
 	wrappedHelp := styles.HelpText.Width(contentWidth).Align(lipgloss.Center).Render(helpKeys)
 	sb.WriteString(wrappedHelp)
 
 	containerStyle := styles.Container.Width(boxWidth)
 	return containerStyle.Render(sb.String())
+}
+
+// getVisualizerView renders a 3-row, 6-bar bouncing audio wave visualizer inside a box.
+func (m *Model) getVisualizerView(styles Styles) string {
+	numBars := 6
+	var heights []int
+
+	playing := m.player != nil && m.playerState.PlaybackStatus == "Playing"
+
+	if playing {
+		// Combine sine/cosine waves for organic equalizer movement
+		angle := float64(m.recordFrame) * 0.8
+		for i := 0; i < numBars; i++ {
+			val := 3.0 + 2.2*math.Sin(angle+float64(i)*1.2) + 0.8*math.Cos(angle*1.8+float64(i)*2.0)
+			h := int(val)
+			if h < 0 {
+				h = 0
+			}
+			if h > 6 {
+				h = 6
+			}
+			heights = append(heights, h)
+		}
+	} else {
+		// Idle state: flat wave at height 1 (just the bottom row has '▄')
+		for i := 0; i < numBars; i++ {
+			heights = append(heights, 1)
+		}
+	}
+
+	// Styles for gradient
+	// Bottom: Blue/Tertiary, Middle: Secondary, Top: Primary (Peaks)
+	topStyle := styles.SongTitle  // Primary
+	midStyle := styles.PlayerName  // Secondary
+	botStyle := styles.VolumeLabel // Blue/Tertiary
+
+	var topRow, midRow, botRow strings.Builder
+
+	for i := 0; i < numBars; i++ {
+		h := heights[i]
+		var t, md, b string
+
+		switch h {
+		case 1:
+			t, md, b = " ", " ", "▄"
+		case 2:
+			t, md, b = " ", " ", "█"
+		case 3:
+			t, md, b = " ", "▄", "█"
+		case 4:
+			t, md, b = " ", "█", "█"
+		case 5:
+			t, md, b = "▄", "█", "█"
+		case 6:
+			t, md, b = "█", "█", "█"
+		default:
+			t, md, b = " ", " ", " "
+		}
+
+		// Apply styles
+		tRendered := topStyle.Render(t)
+		mdRendered := midStyle.Render(md)
+		bRendered := botStyle.Render(b)
+
+		if i > 0 {
+			topRow.WriteString(" ")
+			midRow.WriteString(" ")
+			botRow.WriteString(" ")
+		}
+		topRow.WriteString(tRendered)
+		midRow.WriteString(mdRendered)
+		botRow.WriteString(bRendered)
+	}
+
+	// Combine rows
+	content := fmt.Sprintf("%s\n%s\n%s", topRow.String(), midRow.String(), botRow.String())
+
+	// Wrap in a styled box
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color(ColorBase)).
+		Padding(0, 1)
+
+	return boxStyle.Render(content)
 }
