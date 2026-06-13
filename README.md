@@ -90,12 +90,12 @@ Flags:
 
 ### Quick Install
 ```bash
-go install github.com/Sahas001/laya-tui@latest
+go install github.com/Sahas001/laya@latest
 ```
 
 ### Build from Source
 ```bash
-git clone https://github.com/Sahas001/laya-tui.git
+git clone https://github.com/Sahas001/laya.git
 cd laya-tui
 make build
 # Binary is built as ./laya-tui
