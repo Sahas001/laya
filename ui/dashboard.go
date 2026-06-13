@@ -69,7 +69,7 @@ func (m *Model) viewDashboard(styles Styles) string {
 		if title == "" {
 			title = "Unknown Track"
 		}
-		
+
 		lyricHeader := fmt.Sprintf("󰎆 Lyrics: %s - %s", title, artist)
 		lyricHeaderStyle := styles.LyricsTitle.Width(contentWidth).Align(lipgloss.Center)
 		sb.WriteString(lyricHeaderStyle.Render(lyricHeader))
@@ -120,7 +120,7 @@ func (m *Model) viewDashboard(styles Styles) string {
 		duration := m.playerState.Metadata.Length
 		posStr := formatDuration(m.interpolatedPos)
 		durStr := "--:--"
-		
+
 		var percent float64
 		if duration > 0 {
 			durStr = formatDuration(duration)
@@ -146,7 +146,7 @@ func (m *Model) viewDashboard(styles Styles) string {
 		m.progressBar.Width = progWidth
 		progressBarStr := m.progressBar.ViewAs(percent)
 
-		progRow := fmt.Sprintf("%s  %s  %s", 
+		progRow := fmt.Sprintf("%s  %s  %s",
 			styles.ProgressTime.Render(posStr),
 			progressBarStr,
 			styles.ProgressTime.Render(durStr),
@@ -173,7 +173,7 @@ func (m *Model) viewDashboard(styles Styles) string {
 			volBarWidth = 5
 		}
 		volBar := renderVolumeBar(volPercent, volBarWidth)
-		volRow := fmt.Sprintf("%s%s", 
+		volRow := fmt.Sprintf("%s%s",
 			styles.VolumeLabel.Render(volStr),
 			styles.VolumeValue.Render(volBar),
 		)
@@ -188,10 +188,12 @@ func (m *Model) viewDashboard(styles Styles) string {
 	// 5. Help Hint Footer
 	sb.WriteString("\n")
 	var helpKeys string
-	if m.showLyrics {
-		helpKeys = "j/k: scroll  •  space: play/pause  •  [ and ]: seek  •  H/L: cycle players  •  l/esc: close lyrics"
+	if !m.showHelp {
+		helpKeys = "space: play/pause  •  h: help"
+	} else if m.showLyrics {
+		helpKeys = "j/k: scroll  •  space: play/pause  •  [ and ]: seek  •  H/L: cycle players  •  l/esc: close lyrics  •  h: hide/help"
 	} else {
-		helpKeys = "space: play/pause  •  [ and ]: seek  •  H/L: cycle players  •  l: lyrics  •  s: select player"
+		helpKeys = "space: play/pause  •  [ and ]: seek  •  H/L: cycle players  •  l: lyrics  •  s: select player  •  h: hide help"
 	}
 	wrappedHelp := styles.HelpText.Width(contentWidth).Align(lipgloss.Center).Render(helpKeys)
 	sb.WriteString(wrappedHelp)

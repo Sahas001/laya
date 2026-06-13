@@ -52,6 +52,7 @@ type Model struct {
 	progressBar  progress.Model
 	viewport     viewport.Model // For lyrics
 	showLyrics   bool
+	showHelp     bool
 	lyricsLoaded bool
 	lyricsErr    error
 	lyricsSongID string // Unique song key (Title + Artist) we loaded lyrics for
@@ -356,6 +357,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				switch msg.String() {
 				case "esc", "l":
 					m.showLyrics = false
+				case "h":
+					m.showHelp = !m.showHelp
 				case " ":
 					if m.player != nil {
 						_ = m.player.PlayPause()
@@ -466,6 +469,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case "s":
 					m.currentView = ViewSelectPlayer
 					cmds = append(cmds, m.refreshPlayersCmd())
+				case "h":
+					m.showHelp = !m.showHelp
 				}
 			}
 		}
