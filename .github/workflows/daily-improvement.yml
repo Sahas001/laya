@@ -1,0 +1,37 @@
+name: Daily Project Improvement
+
+on:
+  schedule:
+    # Runs daily at 04:15 UTC (10:00 AM Nepal Time)
+    - cron: '15 4 * * *'
+  workflow_dispatch: # Allows manual trigger anytime from the Actions tab
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  improve:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Run Daily Improvement Engine
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: |
+          python3 .github/scripts/daily_improvement.py
