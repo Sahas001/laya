@@ -1,6 +1,6 @@
 # Waybar & Polybar Integration Guide
 
-LAYA supports a headless streaming mode via the `--stream` flag. When enabled, it outputs single-line JSON events over stdout whenever playback state, current track, artist, album art, or position updates. This is designed for direct consumption by Linux status bars such as **Waybar** and **Polybar**.
+LAYA supports a headless streaming mode via the `--stream` flag. When enabled, it outputs single-line JSON events over stdout whenever playback state or track metadata/position updates. This is designed for direct consumption by Linux status bars such as **Waybar** and **Polybar**.
 
 ## 1. Waybar Configuration
 
@@ -11,14 +11,14 @@ Add a custom module to your Waybar configuration (`~/.config/waybar/config.jsonc
     "format": "{icon} {}",
     "return-type": "json",
     "max-length": 45,
-    "exec": "laya --stream",
+    "exec": "laya-tui --stream",
     "on-click": "playerctl play-pause",
     "on-click-right": "playerctl next",
     "on-click-middle": "playerctl previous",
     "format-icons": {
-        "Playing": "\udb80\udfdf",
-        "Paused": "\udb80\udfe4",
-        "Stopped": "\udb80\udfe1"
+        "playing": "\udb80\udfdf",
+        "paused": "\udb80\udfe4",
+        "stopped": "\udb80\udfe1"
     }
 }
 ```
@@ -34,11 +34,11 @@ And add styling in `~/.config/waybar/style.css`:
     border-radius: 8px;
 }
 
-#custom-laya.Playing {
+#custom-laya.playing {
     color: #a6e3a1;
 }
 
-#custom-laya.Paused {
+#custom-laya.paused {
     color: #fab387;
 }
 ```
@@ -50,7 +50,7 @@ Add a custom IPC script module in `~/.config/polybar/config.ini`:
 ```ini
 [module/laya]
 type = custom/script
-exec = laya --stream
+exec = laya-tui --stream
 tail = true
 format = <label>
 label = %output%
@@ -63,7 +63,7 @@ click-right = playerctl next
 You can verify the stream directly from your terminal:
 
 ```bash
-laya --stream | jq .
+laya-tui --stream | jq .
 ```
 
 Each payload provides `text`, `alt`, `tooltip`, and `class` fields conforming to Waybar JSON specs.
