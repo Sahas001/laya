@@ -43,6 +43,15 @@ var helpSections = []helpSection{
 		{"esc", "close panel"},
 		{"q", "quit"},
 	}},
+	{"Visuals & extras", []helpEntry{
+		{"v", "visualizer style"},
+		{"V", "fullscreen visualizer"},
+		{"A", "live audio on / off"},
+		{"a", "album art on / off"},
+		{"R", "recently played"},
+		{"t", "sleep timer"},
+		{"y", "copy artist – title"},
+	}},
 }
 
 func (m *Model) renderHelpSection(sec helpSection, width int) string {
@@ -67,8 +76,8 @@ func (m *Model) viewHelp(inner int) string {
 	}
 
 	colW := (inner - 4) / 2
-	left := []helpSection{helpSections[0], helpSections[1]}
-	right := []helpSection{helpSections[2], helpSections[3]}
+	left := []helpSection{helpSections[0], helpSections[1], helpSections[3]}
+	right := []helpSection{helpSections[4], helpSections[2]}
 	render := func(secs []helpSection) string {
 		var parts []string
 		for _, sec := range secs {

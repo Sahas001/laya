@@ -95,6 +95,9 @@ func (m *Model) viewHeader(f *frame, inner int) {
 			ind = append(ind, s.IndicatorOn.Render(fmt.Sprintf("%.2g×", r)))
 		}
 	}
+	if l := m.sleepLabel(); l != "" {
+		ind = append(ind, s.IndicatorOn.Render(l))
+	}
 	indicators := ""
 	if len(ind) > 0 {
 		indicators = "   " + strings.Join(ind, " ")
@@ -120,14 +123,17 @@ func (m *Model) viewFooter(f *frame, inner int) {
 
 	var hints []hint
 	switch {
-	case m.showHelp:
-		hints = []hint{{"esc", "close help", 0}, {"q", "quit", 1}}
+	case m.showHelp || m.showHistory:
+		hints = []hint{{"esc", "close", 0}, {"q", "quit", 1}}
+		if m.panelOverflows() {
+			hints = append([]hint{{"j/k", "scroll", 0}}, hints...)
+		}
 	case m.showLyrics:
 		hints = []hint{{"␣", "play/pause", 1}, {"j/k", "scroll", 2}, {"</>", "timing", 4},
 			{"l", "back", 0}, {"?", "help", 0}, {"q", "quit", 3}}
 	default:
-		hints = []hint{{"␣", "play/pause", 1}, {"←/→", "skip", 4}, {"l", "lyrics", 2},
-			{"s", "players", 3}, {"?", "help", 0}, {"q", "quit", 2}}
+		hints = []hint{{"␣", "play/pause", 1}, {"l", "lyrics", 2}, {"V", "visualizer", 3},
+			{"s", "players", 4}, {"?", "help", 0}, {"q", "quit", 2}}
 	}
 	f.add(center.Render(m.renderHints(hints, inner)))
 }
@@ -173,7 +179,11 @@ func (m *Model) viewDashboard() string {
 
 	switch {
 	case m.showHelp:
-		f.add(m.viewHelp(inner))
+		m.panel.SetContent(m.viewHelp(inner))
+		f.add(m.panelView())
+	case m.showHistory:
+		m.panel.SetContent(m.viewHistory(inner))
+		f.add(m.panelView())
 	case m.showLyrics:
 		f.add(m.viewLyrics(inner))
 	default:
@@ -187,12 +197,62 @@ func (m *Model) viewDashboard() string {
 	return m.container(box).Render(f.String())
 }
 
+// panelView renders the scrollable panel, shrinking it to its content.
+func (m *Model) panelView() string {
+	h := m.panel.Height
+	if total := m.panel.TotalLineCount(); total < h {
+		m.panel.Height = total
+		defer func() { m.panel.Height = h }()
+	}
+	return m.panel.View()
+}
+
+// panelOverflows reports whether the open panel needs scrolling.
+func (m *Model) panelOverflows() bool {
+	return m.panel.TotalLineCount() > m.panel.Height
+}
+
+// fixedDashboardRows is the dashboard height without the card and spectrum.
+func (m *Model) fixedDashboardRows() int {
+	// header 2 + blank + blank(after card) + progress + blank + status + toast + footer + border 2
+	rows := 12
+	if !m.compact() {
+		rows += 3 // vertical padding + blank before the footer
+	}
+	return rows
+}
+
+// nowPlayingLayout decides how many rows album art and the spectrum get.
+func (m *Model) nowPlayingLayout(inner int) (artRows, specRows int) {
+	textRows := 4
+	budget := 40
+	if m.height > 0 {
+		budget = m.height - 1 - m.fixedDashboardRows()
+	}
+	if budget-textRows >= 2 {
+		specRows = min(5, budget-textRows)
+	}
+	if m.artAvailable() && inner >= 44 {
+		a := min(8, budget-specRows)
+		if a < 5 && specRows > 2 {
+			steal := min(specRows-2, 5-a)
+			specRows -= steal
+			a += steal
+		}
+		if a >= 5 {
+			artRows = min(a, maxArtRows)
+		}
+	}
+	return artRows, specRows
+}
+
 func (m *Model) viewNowPlaying(f *frame, inner int) {
 	s := m.styles
 	center := lipgloss.NewStyle().Width(inner).Align(lipgloss.Center)
 	meta := m.state.Metadata
+	artRows, specRows := m.nowPlayingLayout(inner)
 
-	// Track card.
+	// Track card, with album art on the left when available.
 	title, artist, album := meta.Title, meta.Artist, meta.Album
 	if title == "" {
 		if !m.hasState {
@@ -203,15 +263,13 @@ func (m *Model) viewNowPlaying(f *frame, inner int) {
 		}
 		album = ""
 	}
-
-	showViz := inner >= 46
-	vizWidth := 0
-	if showViz {
-		vizWidth = numVizBars*2 - 1 + 4 // bars + gaps + padding + border
+	art := ""
+	if artRows > 0 {
+		art = m.viewArt(artRows*2, artRows)
 	}
 	cardWidth := inner
-	if showViz {
-		cardWidth = inner - vizWidth - 2
+	if art != "" {
+		cardWidth = inner - lipgloss.Width(art) - 2
 	}
 	textWidth := cardWidth - 3 // left border + padding
 
@@ -224,13 +282,17 @@ func (m *Model) viewNowPlaying(f *frame, inner int) {
 		card = append(card, s.Album.Render(truncate("󰀥  "+album, textWidth)))
 	}
 	trackCard := s.TrackCard.Width(cardWidth - 1).Render(strings.Join(card, "\n"))
-
-	if showViz {
-		f.add(lipgloss.JoinHorizontal(lipgloss.Center, trackCard, "  ", m.viewVisualizer()))
+	if art != "" {
+		f.add(lipgloss.JoinHorizontal(lipgloss.Center, art, "  ", trackCard))
 	} else {
 		f.add(trackCard)
 	}
 	f.blank()
+
+	// Spectrum sits directly on top of the progress bar.
+	if specRows > 0 {
+		f.add(m.renderViz(inner, specRows))
+	}
 
 	// Progress row.
 	length := meta.Length
@@ -311,57 +373,4 @@ func (m *Model) viewVolume(inner int) string {
 	empty := strings.Repeat("─", width-lipgloss.Width(filled))
 	return s.VolumeLabel.Render(fmt.Sprintf("%s %3d%%", icon, int(math.Round(vol*100)))) + " " +
 		s.VolumeValue.Render(filled) + s.VolumeTrack.Render(empty)
-}
-
-// --- visualizer ---
-
-var vizLevels = []string{" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
-
-// animateViz moves the bars towards a pseudo-random wave while playing and
-// lets them settle when paused.
-func (m *Model) animateViz() {
-	playing := m.player != nil && m.state.PlaybackStatus == mpris.StatusPlaying
-	if playing {
-		m.vizPhase += 0.21
-	}
-	for i := range m.viz {
-		target := 1.0
-		ease := 0.12
-		if playing {
-			fi := float64(i)
-			p := m.vizPhase
-			target = 12 + 6.5*math.Sin(p+fi*0.9) + 4*math.Sin(p*1.73+fi*2.3) + 2.5*math.Sin(p*3.1+fi*0.55)
-			target = math.Max(2, math.Min(24, target))
-			ease = 0.45
-		}
-		m.viz[i] += (target - m.viz[i]) * ease
-	}
-}
-
-func (m *Model) viewVisualizer() string {
-	s := m.styles
-	rowsStyles := []struct {
-		st   lipgloss.Style
-		base int
-	}{{s.VizTop, 16}, {s.VizMid, 8}, {s.VizBot, 0}}
-
-	lines := make([]string, len(rowsStyles))
-	for r, rs := range rowsStyles {
-		var sb strings.Builder
-		for i, h := range m.viz {
-			if i > 0 {
-				sb.WriteByte(' ')
-			}
-			lvl := int(math.Round(h)) - rs.base
-			if lvl < 0 {
-				lvl = 0
-			}
-			if lvl > 8 {
-				lvl = 8
-			}
-			sb.WriteString(vizLevels[lvl])
-		}
-		lines[r] = rs.st.Render(sb.String())
-	}
-	return s.VizBorder.Render(strings.Join(lines, "\n"))
 }

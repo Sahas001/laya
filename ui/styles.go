@@ -78,6 +78,7 @@ type Styles struct {
 	LyricsError   lipgloss.Style
 	LyricsLoading lipgloss.Style
 	ActiveLyric   lipgloss.Style
+	KaraokeRest   lipgloss.Style
 	PastLyric     lipgloss.Style
 	UpcomingLyric lipgloss.Style
 	PlainLyric    lipgloss.Style
@@ -160,6 +161,7 @@ func NewStyles(p Palette) Styles {
 	s.LyricsError = lipgloss.NewStyle().Foreground(c(ColorRed)).Italic(true)
 	s.LyricsLoading = lipgloss.NewStyle().Foreground(c(p.Tertiary)).Italic(true)
 	s.ActiveLyric = lipgloss.NewStyle().Bold(true).Foreground(c(p.Primary))
+	s.KaraokeRest = lipgloss.NewStyle().Bold(true).Foreground(c(blend(p.Primary, ColorBg, 0.55)))
 	s.PastLyric = lipgloss.NewStyle().Foreground(c(ColorSurface))
 	s.UpcomingLyric = lipgloss.NewStyle().Foreground(c(ColorSubtext))
 	s.PlainLyric = lipgloss.NewStyle().Foreground(c(ColorText))

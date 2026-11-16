@@ -18,8 +18,26 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.handleSelectKey(key)
 	}
 
+	// Scrollable panels (help, history).
+	if m.showHelp || m.showHistory {
+		switch key {
+		case "up", "k", "down", "j", "pgup", "pgdown", "ctrl+u", "ctrl+d", "home", "end", "g", "G":
+			switch key {
+			case "g", "home":
+				m.panel.GotoTop()
+			case "G", "end":
+				m.panel.GotoBottom()
+			default:
+				var cmd tea.Cmd
+				m.panel, cmd = m.panel.Update(msg)
+				return cmd
+			}
+			return nil
+		}
+	}
+
 	// Lyrics-only keys.
-	if m.showLyrics && !m.showHelp {
+	if m.showLyrics && !m.showHelp && !m.showHistory {
 		switch key {
 		case "up", "k", "down", "j", "pgup", "pgdown", "ctrl+u", "ctrl+d":
 			m.lyrics.lastManualScroll = time.Now()
@@ -50,11 +68,46 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		switch {
 		case m.showHelp:
 			m.showHelp = false
+		case m.showHistory:
+			m.showHistory = false
+		case m.fullscreen:
+			m.fullscreen = false
 		case m.showLyrics:
 			m.showLyrics = false
 		}
 	case "h", "?":
 		m.showHelp = !m.showHelp
+		m.showHistory = false
+		m.fullscreen = false
+		m.panel.GotoTop()
+	case "R":
+		m.showHistory = !m.showHistory
+		m.showHelp = false
+		m.fullscreen = false
+		m.panel.GotoTop()
+	case "v":
+		m.viz.style = (m.viz.style + 1) % numVizStyles
+		return m.setToast("Visualizer: "+m.viz.style.String(), false)
+	case "V":
+		m.fullscreen = !m.fullscreen
+		m.showHelp, m.showHistory = false, false
+		return tickCmd(tickFast)
+	case "A":
+		return m.toggleAudio()
+	case "a":
+		m.showArt = !m.showArt
+		if !m.showArt {
+			m.deleteKittyImage()
+			return m.setToast("Album art hidden", false)
+		}
+		if m.art.img == nil {
+			return m.setToast("No album art for this track", false)
+		}
+		return m.setToast("Album art shown", false)
+	case "t":
+		return m.cycleSleepTimer()
+	case "y":
+		return m.copyTrack()
 	case " ", "enter":
 		return m.act("Play/pause", (*mpris.Player).PlayPause)
 	case "n", "right":
@@ -83,7 +136,7 @@ func (m *Model) handleKey(msg tea.KeyMsg) tea.Cmd {
 		return m.cycleLoop()
 	case "l":
 		m.showLyrics = !m.showLyrics
-		m.showHelp = false
+		m.showHelp, m.showHistory, m.fullscreen = false, false, false
 		if m.showLyrics {
 			m.resize()
 			return m.ensureLyrics()
@@ -151,7 +204,15 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
-	if m.showLyrics && !m.showHelp {
+	if m.fullscreen {
+		return nil
+	}
+	if m.showHelp || m.showHistory {
+		var cmd tea.Cmd
+		m.panel, cmd = m.panel.Update(msg)
+		return cmd
+	}
+	if m.showLyrics {
 		if msg.Button == tea.MouseButtonWheelUp || msg.Button == tea.MouseButtonWheelDown {
 			m.lyrics.lastManualScroll = time.Now()
 			var cmd tea.Cmd
@@ -317,4 +378,22 @@ func (m *Model) shiftLyrics(d time.Duration) tea.Cmd {
 	m.lyricsDirty = true
 	m.refreshLyrics()
 	return m.setToast("Lyrics offset "+formatOffset(m.lyrics.offset), false)
+}
+
+// toggleAudio turns live audio capture on or off.
+func (m *Model) toggleAudio() tea.Cmd {
+	if m.viz.capture == nil {
+		return m.setToast("Live audio is disabled (--no-audio)", false)
+	}
+	if m.realAudio() {
+		m.viz.audioOn = false
+		m.viz.capture.Stop()
+		return m.setToast("Visualizer: synthetic (audio capture off)", false)
+	}
+	m.viz.audioOn = true
+	if err := m.viz.capture.Start(); err != nil {
+		m.viz.audioOn = false
+		return m.setToast("Audio capture failed: "+shortErr(err), true)
+	}
+	return m.setToast("Visualizer: live audio", false)
 }

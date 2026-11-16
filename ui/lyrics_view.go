@@ -3,12 +3,14 @@ package ui
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 func songKey(artist, title string) string {
@@ -57,9 +59,11 @@ func (m *Model) refreshLyrics() {
 		return
 	}
 	active := m.activeLyric()
-	if active != m.lyrics.renderedActive || m.lyricsDirty {
+	fill := m.karaokeFill(active)
+	if active != m.lyrics.renderedActive || fill != m.lyrics.renderedFill || m.lyricsDirty {
 		m.renderLyrics(active)
 		m.lyrics.renderedActive = active
+		m.lyrics.renderedFill = fill
 		m.lyricsDirty = false
 	}
 
@@ -106,7 +110,15 @@ func (m *Model) renderLyrics(active int) {
 		if text == "" && m.lyrics.synced {
 			text = "♪"
 		}
-		rendered := st.Width(width).Align(lipgloss.Center).Render(text)
+		var rendered string
+		if i == active && line.Text != "" {
+			// Karaoke: sweep the highlight across the line as it's sung.
+			done, rest := splitAtCells(text, m.karaokeFill(active))
+			rendered = lipgloss.NewStyle().Width(width).Align(lipgloss.Center).
+				Render(s.ActiveLyric.Render(done) + s.KaraokeRest.Render(rest))
+		} else {
+			rendered = st.Width(width).Align(lipgloss.Center).Render(text)
+		}
 		h := lipgloss.Height(rendered)
 		m.lyrics.rowStart[i] = rows
 		m.lyrics.rowHeight[i] = h
@@ -177,4 +189,41 @@ func (m *Model) viewLyrics(inner int) string {
 
 func formatOffset(d time.Duration) string {
 	return fmt.Sprintf("%+.2fs", d.Seconds())
+}
+
+// karaokeFill returns how many cells of the active line have been sung.
+func (m *Model) karaokeFill(active int) int {
+	if active < 0 || active >= len(m.lyrics.lines) {
+		return -1
+	}
+	lines := m.lyrics.lines
+	start := lines[active].Time
+	end := start + 4*time.Second
+	if active+1 < len(lines) && lines[active+1].Time > start {
+		end = lines[active+1].Time
+	}
+	// Most of the line is sung well before the next one starts.
+	span := time.Duration(float64(end-start) * 0.85)
+	if span <= 0 {
+		return -1
+	}
+	pos := m.pos + lyricLatency + m.lyrics.offset - start
+	frac := math.Max(0, math.Min(1, float64(pos)/float64(span)))
+	return int(math.Round(frac * float64(ansi.StringWidth(lines[active].Text))))
+}
+
+// splitAtCells splits plain text after n display cells.
+func splitAtCells(s string, n int) (string, string) {
+	if n <= 0 {
+		return "", s
+	}
+	w := 0
+	for i, r := range s {
+		rw := ansi.StringWidth(string(r))
+		if w+rw > n {
+			return s[:i], s[i:]
+		}
+		w += rw
+	}
+	return s, ""
 }

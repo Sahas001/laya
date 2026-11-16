@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/Sahas001/laya/internal/format"
+	"github.com/Sahas001/laya/internal/notify"
 	"github.com/Sahas001/laya/mpris"
 	"github.com/godbus/dbus/v5"
 )
@@ -35,6 +36,7 @@ type StreamOptions struct {
 	PlayerSearch string
 	Format       string // when non-empty, emit plain text from this template instead of JSON
 	Interval     time.Duration
+	Notifier     *notify.Notifier // optional: announce track changes
 }
 
 func statusIcon(status string) string {
@@ -221,7 +223,8 @@ func runStream(conn *dbus.Conn, opts StreamOptions, w io.Writer) {
 	}
 
 	var target *streamTarget
-	var last string
+	var last, lastTrack string
+	primed := false
 
 	emit := func() {
 		var state *mpris.PlayerState
@@ -243,6 +246,17 @@ func runStream(conn *dbus.Conn, opts StreamOptions, w io.Writer) {
 		identity := ""
 		if target != nil {
 			identity = target.identity
+		}
+		if state != nil && state.Metadata.Title != "" {
+			key := identity + "\x1f" + state.Metadata.Key()
+			if key != lastTrack {
+				if primed && opts.Notifier != nil && state.PlaybackStatus == mpris.StatusPlaying {
+					md := state.Metadata
+					_ = opts.Notifier.Notify(notify.Track{Title: md.Title, Artist: md.Artist,
+						Album: md.Album, Player: identity, ArtURL: md.ArtURL})
+				}
+				lastTrack, primed = key, true
+			}
 		}
 		out := buildOutput(state, identity, time.Now())
 

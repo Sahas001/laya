@@ -8,6 +8,8 @@ import (
 	"runtime/debug"
 	"time"
 
+	"github.com/Sahas001/laya/internal/audio"
+	"github.com/Sahas001/laya/internal/notify"
 	"github.com/Sahas001/laya/mpris"
 	"github.com/Sahas001/laya/ui"
 	tea "github.com/charmbracelet/bubbletea"
@@ -36,6 +38,10 @@ func Run() {
 		"(placeholders: {artist} {title} {album} {player} {status} {icon}\n {position} {length} {percentage} {bar} {text})")
 	intervalFlag := flag.Duration("interval", time.Second, "With --stream: refresh interval")
 	versionFlag := flag.Bool("version", false, "Print version information and exit")
+	noAudioFlag := flag.Bool("no-audio", false, "Don't capture system audio; use the synthetic visualizer")
+	artFlag := flag.String("art", "auto", "Album art: auto, kitty, blocks or off")
+	vizFlag := flag.String("viz", "bars", "Initial visualizer style: bars, mirror, scope or braille")
+	notifyFlag := flag.Bool("notify", false, "Show a desktop notification when the track changes")
 
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Laya — MPRIS media controller & now-playing dashboard\n\n")
@@ -43,10 +49,17 @@ func Run() {
 		flag.PrintDefaults()
 		fmt.Fprintf(os.Stderr, "\nExamples:\n")
 		fmt.Fprintf(os.Stderr, "  laya-tui --player spotify\n")
+		fmt.Fprintf(os.Stderr, "  laya-tui --viz mirror --notify\n")
 		fmt.Fprintf(os.Stderr, "  laya-tui --stream                                        # Waybar JSON\n")
 		fmt.Fprintf(os.Stderr, "  laya-tui --stream --format '{icon} {artist} - {title}'   # Polybar text\n")
 	}
 	flag.Parse()
+
+	artMode, err := ui.ParseArtMode(*artFlag)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(2)
+	}
 
 	if *versionFlag {
 		fmt.Printf("laya-tui %s\n", version())
@@ -66,15 +79,27 @@ func Run() {
 	}
 
 	if *streamFlag {
-		runStream(conn, StreamOptions{
+		opts := StreamOptions{
 			PlayerSearch: *playerFlag,
 			Format:       *formatFlag,
 			Interval:     *intervalFlag,
-		}, os.Stdout)
+		}
+		if *notifyFlag {
+			opts.Notifier = notify.New(conn)
+		}
+		runStream(conn, opts, os.Stdout)
 		return
 	}
 
 	m := ui.NewModel(conn)
+	term := ui.NewTerminal(os.Stdout)
+	m.SetTerminal(term)
+	m.SetArtMode(artMode)
+	m.SetVizStyle(ui.ParseVizStyle(*vizFlag))
+	m.SetAudio(audio.New(), !*noAudioFlag)
+	if *notifyFlag {
+		m.SetNotifier(notify.New(conn))
+	}
 
 	if *playerFlag != "" {
 		names, err := mpris.ListPlayers(conn)
@@ -91,7 +116,7 @@ func Run() {
 		m.SetInitialPlayer(bus, identity)
 	}
 
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion(), tea.WithOutput(term))
 
 	// Forward MPRIS change signals so the UI reacts instantly instead of waiting
 	// for the next poll.
@@ -104,7 +129,9 @@ func Run() {
 		}()
 	}
 
-	if _, err := p.Run(); err != nil {
+	_, err = p.Run()
+	m.Close()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
 		os.Exit(1)
 	}
