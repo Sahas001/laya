@@ -5,6 +5,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Sahas001/laya/internal/audio"
+	"github.com/Sahas001/laya/internal/notify"
 	"github.com/Sahas001/laya/mpris"
 	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -22,7 +24,8 @@ const (
 )
 
 const (
-	tickInterval     = 80 * time.Millisecond
+	tickFast         = 40 * time.Millisecond  // while something animates
+	tickIdle         = 250 * time.Millisecond // paused, nothing moving
 	pollInterval     = time.Second
 	toastDuration    = 3 * time.Second
 	seekSmall        = 5 * time.Second
@@ -31,7 +34,7 @@ const (
 	lyricLatency     = 250 * time.Millisecond // D-Bus round trip + audio buffer compensation
 	lyricOffsetStep  = 250 * time.Millisecond
 	manualScrollHold = 5 * time.Second
-	numVizBars       = 8
+	historyLimit     = 100
 )
 
 // Messages.
@@ -75,6 +78,7 @@ type lyricsState struct {
 	source           string
 	offset           time.Duration
 	renderedActive   int
+	renderedFill     int
 	rowStart         []int
 	rowHeight        []int
 	totalRows        int
@@ -112,8 +116,22 @@ type Model struct {
 	viewport    viewport.Model
 	lyrics      lyricsState
 	lyricsDirty bool
-	viz         []float64
-	vizPhase    float64
+	viz         vizState
+	fullscreen  bool
+	panel       viewport.Model // scrollable help / history panel
+	showHistory bool
+	history     []HistoryEntry
+	lastTrack   string // track key used for history / notifications
+	trackPrimed bool   // first track of a player has been seen
+
+	// Optional integrations (set by the app).
+	term     *Terminal
+	notifier TrackNotifier
+	artMode  ArtMode
+	showArt  bool
+	art      artState
+
+	sleepAt     time.Time // zero when the sleep timer is off
 	toast       string
 	toastErr    bool
 	toastID     int
@@ -141,7 +159,8 @@ func NewModel(conn *dbus.Conn) *Model {
 		styles:      DefaultStyles(),
 		progressBar: newProgressBar(DefaultPalette),
 		viewport:    vp,
-		viz:         make([]float64, numVizBars),
+		panel:       viewport.New(0, 0),
+		showArt:     true,
 		lyrics:      lyricsState{renderedActive: -2},
 	}
 }
@@ -155,12 +174,38 @@ func (m *Model) SetInitialPlayer(busName, identity string) {
 
 // Init starts tickers and loads the player list.
 func (m *Model) Init() tea.Cmd {
-	return tea.Batch(m.refreshPlayersCmd(), m.fetchState(), tickCmd(), pollCmd())
+	if m.viz.capture != nil && m.viz.audioOn {
+		_ = m.viz.capture.Start()
+	}
+	return tea.Batch(m.refreshPlayersCmd(), m.fetchState(), tickCmd(tickFast), pollCmd())
 }
 
-func tickCmd() tea.Cmd {
-	return tea.Tick(tickInterval, func(t time.Time) tea.Msg { return TickMsg(t) })
+func tickCmd(d time.Duration) tea.Cmd {
+	return tea.Tick(d, func(t time.Time) tea.Msg { return TickMsg(t) })
 }
+
+// TrackNotifier announces track changes (implemented by internal/notify).
+type TrackNotifier interface {
+	Notify(t notify.Track) error
+}
+
+// SetTerminal enables out-of-band terminal features (kitty images, OSC 52).
+func (m *Model) SetTerminal(t *Terminal) { m.term = t }
+
+// SetAudio sets the audio source for the visualizer; enabled controls whether
+// it starts capturing immediately.
+func (m *Model) SetAudio(c *audio.Capture, enabled bool) {
+	m.viz.capture, m.viz.audioOn = c, enabled
+}
+
+// SetArtMode chooses how album art is drawn.
+func (m *Model) SetArtMode(mode ArtMode) { m.artMode = mode }
+
+// SetVizStyle chooses the initial visualizer style.
+func (m *Model) SetVizStyle(s VizStyle) { m.viz.style = s }
+
+// SetNotifier enables desktop notifications on track changes.
+func (m *Model) SetNotifier(n TrackNotifier) { m.notifier = n }
 
 func pollCmd() tea.Cmd {
 	return tea.Tick(pollInterval, func(t time.Time) tea.Msg { return PollMsg(t) })
@@ -224,6 +269,7 @@ func (m *Model) selectPlayer(info PlayerInfo) tea.Cmd {
 	m.preMuteVol = 0
 	m.lyrics = lyricsState{renderedActive: -2}
 	m.lyricsDirty = true
+	m.lastTrack, m.trackPrimed = "", false
 	return m.fetchState()
 }
 
@@ -235,8 +281,11 @@ func (m *Model) playerLost() tea.Cmd {
 	m.hasState = false
 	m.showLyrics = false
 	m.view = ViewSelectPlayer
+	m.fullscreen = false
 	m.themeArt = ""
 	m.applyTheme(nil)
+	m.art.clear()
+	m.lastTrack, m.trackPrimed = "", false
 	if name == "" {
 		name = "Player"
 	}
@@ -281,10 +330,13 @@ func (m *Model) applyState(st mpris.PlayerState) tea.Cmd {
 		m.themeArt = st.Metadata.ArtURL
 		if m.themeArt == "" {
 			m.applyTheme(nil)
+			m.art.clear()
 		} else {
 			cmds = append(cmds, ExtractColorsCmd(m.themeArt))
 		}
 	}
+
+	cmds = append(cmds, m.trackChanged(st))
 
 	if m.showLyrics {
 		cmds = append(cmds, m.ensureLyrics())
@@ -363,7 +415,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(cmds...)
 
 	case PollMsg:
-		cmds := []tea.Cmd{m.fetchState(), pollCmd()}
+		cmds := []tea.Cmd{m.fetchState(), pollCmd(), m.checkSleepTimer(time.Time(msg))}
 		if m.view == ViewSelectPlayer {
 			cmds = append(cmds, m.refreshPlayersCmd())
 		}
@@ -400,6 +452,13 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case ThemeUpdateMsg:
 		if msg.ArtURL == m.themeArt {
 			m.applyTheme(msg.Colors)
+			m.art.set(msg.ArtURL, msg.Image)
+		}
+		return m, nil
+
+	case copyDoneMsg:
+		if msg.err != nil && m.term == nil {
+			return m, m.setToast("Copy failed: "+shortErr(msg.err), true)
 		}
 		return m, nil
 
@@ -425,14 +484,19 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case TickMsg:
+		now := time.Time(msg)
 		if m.hasState {
-			m.pos = m.state.PositionAt(time.Time(msg))
+			m.pos = m.state.PositionAt(now)
 		}
-		m.animateViz()
-		if m.showLyrics {
+		m.updateViz(now)
+		if m.showLyrics || m.fullscreen {
 			m.refreshLyrics()
 		}
-		return m, tickCmd()
+		next := tickIdle
+		if m.vizActive() {
+			next = tickFast
+		}
+		return m, tickCmd(next)
 	}
 	return m, nil
 }
@@ -465,6 +529,10 @@ func (m *Model) layout() (box, inner int) {
 
 // View renders the TUI screen.
 func (m *Model) View() string {
+	if m.fullscreen && m.view == ViewDashboard && m.width > 0 && m.height > 0 {
+		m.boxX, m.boxY = 0, 0
+		return m.viewFullscreen()
+	}
 	var content string
 	switch m.view {
 	case ViewSelectPlayer:
@@ -504,6 +572,7 @@ func (m *Model) resize() {
 		vh = 4
 	}
 	m.viewport.Height = vh
+	m.panel.Width, m.panel.Height = inner, vh+3 // panels don't have the lyric header
 	m.lyricsDirty = true
 	if m.showLyrics {
 		m.refreshLyrics()

@@ -1,6 +1,9 @@
 package ui
 
 import (
+	"bytes"
+	"encoding/base64"
+	"image/png"
 	"testing"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
@@ -30,5 +33,19 @@ func TestPaletteFromColors(t *testing.T) {
 	b, _ := colorful.Hex(p.Secondary)
 	if a.DistanceLab(b) < 0.15 {
 		t.Errorf("primary %s and secondary %s are too similar", p.Primary, p.Secondary)
+	}
+}
+
+func TestLoadArtImageDataURL(t *testing.T) {
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, testImage()); err != nil {
+		t.Fatal(err)
+	}
+	img, err := loadArtImage("data:image/png;base64," + base64.StdEncoding.EncodeToString(buf.Bytes()))
+	if err != nil || img.Bounds().Dx() != 64 {
+		t.Fatalf("img=%v err=%v", img, err)
+	}
+	if _, err := loadArtImage("data:text/plain,hello"); err == nil {
+		t.Error("expected error for non-base64 data URL")
 	}
 }

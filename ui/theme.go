@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"encoding/base64"
 	"fmt"
 	"image"
 	_ "image/gif"  // album art decoders
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/EdlinOrg/prominentcolor"
@@ -26,7 +28,8 @@ var artClient = &http.Client{Timeout: 4 * time.Second}
 // A nil Colors slice means "reset to the default palette".
 type ThemeUpdateMsg struct {
 	ArtURL string
-	Colors []string // hex colours, most prominent first
+	Colors []string    // hex colours, most prominent first
+	Image  image.Image // decoded album art, nil on failure
 }
 
 // ExtractColorsCmd returns a tea.Cmd that runs colour extraction in the background.
@@ -37,6 +40,7 @@ func ExtractColorsCmd(artURL string) tea.Cmd {
 		if err != nil {
 			return msg
 		}
+		msg.Image = img
 		centroids, err := prominentcolor.KmeansWithAll(4, img, prominentcolor.ArgumentDefault,
 			prominentcolor.DefaultSize, prominentcolor.GetDefaultMasks())
 		if err != nil || len(centroids) == 0 {
@@ -63,6 +67,13 @@ func loadArtImage(artURL string) (image.Image, error) {
 		}
 		defer f.Close()
 		r = f
+	} else if strings.HasPrefix(artURL, "data:") {
+		// data:image/png;base64,… (mpv-mpris, some browsers)
+		comma := strings.IndexByte(artURL, ',')
+		if comma < 0 || !strings.Contains(artURL[:comma], ";base64") {
+			return nil, fmt.Errorf("unsupported data URL")
+		}
+		r = base64.NewDecoder(base64.StdEncoding, strings.NewReader(artURL[comma+1:]))
 	} else if hasHTTPScheme(artURL) {
 		req, err := http.NewRequest(http.MethodGet, artURL, nil)
 		if err != nil {

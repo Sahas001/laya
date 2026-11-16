@@ -10,6 +10,8 @@ require (
 	github.com/charmbracelet/x/ansi v0.10.2
 	github.com/godbus/dbus/v5 v5.2.4
 	github.com/lucasb-eyer/go-colorful v1.4.1
+	github.com/muesli/termenv v0.16.0
+	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646
 )
 
 require (
@@ -25,8 +27,6 @@ require (
 	github.com/mattn/go-runewidth v0.0.31 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
-	github.com/muesli/termenv v0.16.0 // indirect
-	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/oliamb/cutter v0.2.2 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect

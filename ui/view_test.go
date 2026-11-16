@@ -37,8 +37,10 @@ func fakeModel(w, h int) *Model {
 	}
 	m.pos = m.state.Position
 	m.Update(tea.WindowSizeMsg{Width: w, Height: h})
+	now := time.Now()
 	for i := 0; i < 10; i++ {
-		m.animateViz()
+		now = now.Add(40 * time.Millisecond)
+		m.updateViz(now)
 	}
 	return m
 }
