@@ -1,6 +1,11 @@
 # Waybar & Polybar Integration Guide
 
-LAYA supports a headless streaming mode via the `--stream` flag. When enabled, it outputs single-line JSON events over stdout whenever playback state or track metadata/position updates. This is designed for direct consumption by Linux status bars such as **Waybar** and **Polybar**.
+LAYA supports a headless streaming mode via the `--stream` flag. It prints one line to stdout whenever playback state, track metadata or position changes: immediately on MPRIS signals, and otherwise every `--interval` (default `1s`). Identical consecutive lines are suppressed.
+
+- By default each line is a **JSON** object for **Waybar**.
+- With `--format "<template>"` each line is **plain text** for **Polybar**, i3blocks, tmux and similar tools.
+
+When no `--player` is given, LAYA follows whichever player is currently playing and stays on the last one when everything is paused.
 
 ## 1. Waybar Configuration
 
@@ -45,12 +50,12 @@ And add styling in `~/.config/waybar/style.css`:
 
 ## 2. Polybar Configuration
 
-Add a custom IPC script module in `~/.config/polybar/config.ini`:
+Polybar displays script output verbatim, so use `--format` to emit plain text instead of JSON. Add a custom script module in `~/.config/polybar/config.ini`:
 
 ```ini
 [module/laya]
 type = custom/script
-exec = laya-tui --stream
+exec = laya-tui --stream --format "{icon} {artist} - {title}"
 tail = true
 format = <label>
 label = %output%
@@ -66,4 +71,21 @@ You can verify the stream directly from your terminal:
 laya-tui --stream | jq .
 ```
 
-Each payload provides `text`, `alt`, `tooltip`, and `class` fields conforming to Waybar JSON specs.
+Each JSON payload provides the Waybar fields `text`, `alt`, `tooltip`, `class` and `percentage`, plus `artist`, `title`, `album`, `player`, `status`, `position`, `length` and `progress_bar_chars` for custom scripts.
+
+### `--format` placeholders
+
+| Placeholder | Example |
+| --- | --- |
+| `{artist}` `{title}` `{album}` | `Daft Punk`, `Contact`, `Random Access Memories` |
+| `{player}` | `Spotify` |
+| `{status}` / `{icon}` | `Playing` / `▶` (`⏸`, `⏹`) |
+| `{position}` / `{length}` | `01:23` / `06:21` (`live` for streams) |
+| `{percentage}` / `{bar}` | `21` / `██░░░░░░░░` |
+| `{text}` | the same text Waybar shows |
+
+If a track has no artist (common for browser videos), separators such as `{artist} - ` are dropped automatically.
+
+```bash
+laya-tui --stream --format "{icon} {title} [{position}/{length}]"
+```

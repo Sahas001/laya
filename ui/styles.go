@@ -2,161 +2,175 @@ package ui
 
 import (
 	"github.com/charmbracelet/lipgloss"
+	colorful "github.com/lucasb-eyer/go-colorful"
 )
 
-// Colors
+// Base colours (Catppuccin Mocha).
 const (
-	ColorBg         = "#1E1E2E" // Catppuccin Mocha Crust/Base
-	ColorBase       = "#313244"
-	ColorLavender   = "#B4BEFE"
-	ColorMauve      = "#CBA6F7"
-	ColorBlue       = "#89B4FA"
-	ColorSapphire   = "#74C7EC"
-	ColorGreen      = "#A6E3A1"
-	ColorYellow     = "#F9E2AF"
-	ColorRed        = "#F38BA8"
-	ColorOverlay    = "#6C7086"
-	ColorText       = "#CDD6F4"
-	ColorSubtext    = "#A6ADC8"
+	ColorBg       = "#1E1E2E"
+	ColorBase     = "#313244"
+	ColorSurface  = "#45475A"
+	ColorLavender = "#B4BEFE"
+	ColorMauve    = "#CBA6F7"
+	ColorBlue     = "#89B4FA"
+	ColorSapphire = "#74C7EC"
+	ColorGreen    = "#A6E3A1"
+	ColorYellow   = "#F9E2AF"
+	ColorPeach    = "#FAB387"
+	ColorRed      = "#F38BA8"
+	ColorOverlay  = "#6C7086"
+	ColorText     = "#CDD6F4"
+	ColorSubtext  = "#A6ADC8"
 )
 
-// Styles struct holds all the pre-defined lipgloss styles.
+// Palette holds the accent colours every themed style is derived from.
+type Palette struct {
+	Primary   string
+	Secondary string
+	Tertiary  string
+}
+
+// DefaultPalette is used when no album art is available.
+var DefaultPalette = Palette{Primary: ColorMauve, Secondary: ColorSapphire, Tertiary: ColorBlue}
+
+// Styles holds all the lipgloss styles used by the UI.
 type Styles struct {
-	Header         lipgloss.Style
-	PlayerName     lipgloss.Style
-	SongTitle      lipgloss.Style
-	Artist         lipgloss.Style
-	Album          lipgloss.Style
-	ProgressTime   lipgloss.Style
-	StatusPlaying  lipgloss.Style
-	StatusPaused   lipgloss.Style
-	StatusStopped  lipgloss.Style
-	VolumeLabel    lipgloss.Style
-	VolumeValue    lipgloss.Style
-	Container      lipgloss.Style
-	Border         lipgloss.Style
-	HelpText       lipgloss.Style
-	KeyStyle       lipgloss.Style
+	Palette Palette
+
+	Header       lipgloss.Style
+	PlayerName   lipgloss.Style
+	DotPlaying   lipgloss.Style
+	DotPaused    lipgloss.Style
+	DotStopped   lipgloss.Style
+	IndicatorOn  lipgloss.Style
+	IndicatorOff lipgloss.Style
+
+	SongTitle lipgloss.Style
+	Artist    lipgloss.Style
+	Album     lipgloss.Style
+	TrackCard lipgloss.Style
+
+	ProgressTime  lipgloss.Style
+	LiveBadge     lipgloss.Style
+	StatusPlaying lipgloss.Style
+	StatusPaused  lipgloss.Style
+	StatusStopped lipgloss.Style
+	VolumeLabel   lipgloss.Style
+	VolumeValue   lipgloss.Style
+	VolumeTrack   lipgloss.Style
+
+	Container lipgloss.Style
+	HelpText  lipgloss.Style
+	HelpKey   lipgloss.Style
+	HelpDesc  lipgloss.Style
+	HelpTitle lipgloss.Style
+	Toast     lipgloss.Style
+	ToastErr  lipgloss.Style
+
 	SelectTitle    lipgloss.Style
 	SelectActive   lipgloss.Style
 	SelectInactive lipgloss.Style
-	LyricsTitle    lipgloss.Style
-	LyricsContent  lipgloss.Style
-	LyricsError    lipgloss.Style
-	LyricsLoading  lipgloss.Style
-	ActiveLyric    lipgloss.Style
-	InactiveLyric  lipgloss.Style
-	TrackCard      lipgloss.Style
+	SelectMeta     lipgloss.Style
+	SelectCurrent  lipgloss.Style
+
+	LyricsTitle   lipgloss.Style
+	LyricsMeta    lipgloss.Style
+	LyricsError   lipgloss.Style
+	LyricsLoading lipgloss.Style
+	ActiveLyric   lipgloss.Style
+	PastLyric     lipgloss.Style
+	UpcomingLyric lipgloss.Style
+	PlainLyric    lipgloss.Style
+
+	VizTop    lipgloss.Style
+	VizMid    lipgloss.Style
+	VizBot    lipgloss.Style
+	VizBorder lipgloss.Style
 }
 
-// DefaultStyles returns the default set of styles.
-func DefaultStyles() Styles {
-	s := Styles{}
+// blend mixes hex colour a towards b by t (0 = a, 1 = b), in Lab space.
+func blend(a, b string, t float64) string {
+	ca, err1 := colorful.Hex(a)
+	cb, err2 := colorful.Hex(b)
+	if err1 != nil || err2 != nil {
+		return a
+	}
+	return ca.BlendLab(cb, t).Clamped().Hex()
+}
 
-	s.Header = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color(ColorMauve)).
-		Background(lipgloss.Color(ColorBase)).
-		Padding(0, 2).
-		MarginRight(1)
+// DefaultStyles returns the styles for the default palette.
+func DefaultStyles() Styles { return NewStyles(DefaultPalette) }
 
-	s.PlayerName = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorSapphire)).
-		Italic(true)
+// NewStyles builds the full style set from an accent palette.
+func NewStyles(p Palette) Styles {
+	c := func(s string) lipgloss.Color { return lipgloss.Color(s) }
+	border := blend(p.Primary, ColorBg, 0.62)
 
-	s.SongTitle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color(ColorMauve))
+	s := Styles{Palette: p}
 
-	s.Artist = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorText))
+	s.Header = lipgloss.NewStyle().Bold(true).
+		Foreground(c(ColorBg)).Background(c(p.Primary)).Padding(0, 1)
+	s.PlayerName = lipgloss.NewStyle().Foreground(c(p.Secondary)).Italic(true)
+	s.DotPlaying = lipgloss.NewStyle().Foreground(c(ColorGreen))
+	s.DotPaused = lipgloss.NewStyle().Foreground(c(ColorYellow))
+	s.DotStopped = lipgloss.NewStyle().Foreground(c(ColorRed))
+	s.IndicatorOn = lipgloss.NewStyle().Foreground(c(p.Primary)).Bold(true)
+	s.IndicatorOff = lipgloss.NewStyle().Foreground(c(ColorSurface))
 
-	s.Album = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorOverlay)).
-		Italic(true)
-
+	s.SongTitle = lipgloss.NewStyle().Bold(true).Foreground(c(p.Primary))
+	s.Artist = lipgloss.NewStyle().Foreground(c(p.Secondary))
+	s.Album = lipgloss.NewStyle().Foreground(c(ColorOverlay)).Italic(true)
 	s.TrackCard = lipgloss.NewStyle().
-		Border(lipgloss.NormalBorder(), false, false, false, true).
-		BorderForeground(lipgloss.Color(ColorSapphire)).
-		PaddingLeft(2).
-		MarginLeft(2).
-		MarginBottom(1)
+		Border(lipgloss.ThickBorder(), false, false, false, true).
+		BorderForeground(c(p.Secondary)).
+		PaddingLeft(2)
 
-	s.ProgressTime = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorOverlay))
+	s.ProgressTime = lipgloss.NewStyle().Foreground(c(ColorSubtext))
+	s.LiveBadge = lipgloss.NewStyle().Bold(true).Foreground(c(ColorRed))
 
-	s.StatusPlaying = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color(ColorBg)).
-		Background(lipgloss.Color(ColorGreen)).
-		Padding(0, 1)
+	badge := lipgloss.NewStyle().Bold(true).Foreground(c(ColorBg)).Padding(0, 1)
+	s.StatusPlaying = badge.Background(c(ColorGreen))
+	s.StatusPaused = badge.Background(c(ColorYellow))
+	s.StatusStopped = badge.Background(c(ColorRed))
 
-	s.StatusPaused = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color(ColorBg)).
-		Background(lipgloss.Color(ColorYellow)).
-		Padding(0, 1)
-
-	s.StatusStopped = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color(ColorBg)).
-		Background(lipgloss.Color(ColorRed)).
-		Padding(0, 1)
-
-	s.VolumeLabel = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorBlue))
-
-	s.VolumeValue = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorText))
+	s.VolumeLabel = lipgloss.NewStyle().Foreground(c(p.Tertiary))
+	s.VolumeValue = lipgloss.NewStyle().Foreground(c(p.Secondary))
+	s.VolumeTrack = lipgloss.NewStyle().Foreground(c(ColorSurface))
 
 	s.Container = lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color(ColorBase)).
+		BorderForeground(c(border)).
 		Padding(1, 2)
+	s.HelpText = lipgloss.NewStyle().Foreground(c(ColorOverlay))
+	s.HelpKey = lipgloss.NewStyle().Foreground(c(p.Primary)).Bold(true)
+	s.HelpDesc = lipgloss.NewStyle().Foreground(c(ColorSubtext))
+	s.HelpTitle = lipgloss.NewStyle().Foreground(c(p.Secondary)).Bold(true)
+	s.Toast = lipgloss.NewStyle().Foreground(c(p.Tertiary)).Italic(true)
+	s.ToastErr = lipgloss.NewStyle().Foreground(c(ColorRed)).Italic(true)
 
-	s.HelpText = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorOverlay))
+	s.SelectTitle = lipgloss.NewStyle().Bold(true).Foreground(c(p.Primary))
+	s.SelectActive = lipgloss.NewStyle().Bold(true).Foreground(c(ColorText)).
+		Background(c(blend(p.Primary, ColorBg, 0.75)))
+	s.SelectInactive = lipgloss.NewStyle().Foreground(c(ColorSubtext))
+	s.SelectMeta = lipgloss.NewStyle().Foreground(c(ColorOverlay))
+	s.SelectCurrent = lipgloss.NewStyle().Foreground(c(p.Secondary))
 
-	s.KeyStyle = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorMauve)).
-		Bold(true)
+	s.LyricsTitle = lipgloss.NewStyle().Bold(true).Foreground(c(p.Primary))
+	s.LyricsMeta = lipgloss.NewStyle().Foreground(c(ColorOverlay))
+	s.LyricsError = lipgloss.NewStyle().Foreground(c(ColorRed)).Italic(true)
+	s.LyricsLoading = lipgloss.NewStyle().Foreground(c(p.Tertiary)).Italic(true)
+	s.ActiveLyric = lipgloss.NewStyle().Bold(true).Foreground(c(p.Primary))
+	s.PastLyric = lipgloss.NewStyle().Foreground(c(ColorSurface))
+	s.UpcomingLyric = lipgloss.NewStyle().Foreground(c(ColorSubtext))
+	s.PlainLyric = lipgloss.NewStyle().Foreground(c(ColorText))
 
-	s.SelectTitle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color(ColorMauve)).
-		MarginBottom(1)
-
-	s.SelectActive = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color(ColorGreen)).
-		SetString("> ")
-
-	s.SelectInactive = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorOverlay)).
-		SetString("  ")
-
-	s.LyricsTitle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color(ColorMauve)).
-		Align(lipgloss.Center)
-
-	s.LyricsContent = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorText))
-
-	s.LyricsError = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorRed)).
-		Italic(true)
-
-	s.LyricsLoading = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorBlue)).
-		Italic(true)
-
-	s.ActiveLyric = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(lipgloss.Color(ColorGreen))
-
-	s.InactiveLyric = lipgloss.NewStyle().
-		Foreground(lipgloss.Color(ColorOverlay))
+	s.VizTop = lipgloss.NewStyle().Foreground(c(p.Primary))
+	s.VizMid = lipgloss.NewStyle().Foreground(c(p.Secondary))
+	s.VizBot = lipgloss.NewStyle().Foreground(c(p.Tertiary))
+	s.VizBorder = lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(c(border)).
+		Padding(0, 1)
 
 	return s
 }
