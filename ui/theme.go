@@ -3,69 +3,73 @@ package ui
 import (
 	"fmt"
 	"image"
-	_ "image/jpeg"
-	_ "image/png"
+	_ "image/gif"  // album art decoders
+	_ "image/jpeg" // album art decoders
+	_ "image/png"  // album art decoders
+	"io"
 	"net/http"
-	"net/url"
 	"os"
-	"strconv"
-	"strings"
+	"sort"
 	"time"
 
 	"github.com/EdlinOrg/prominentcolor"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/bubbles/progress"
+	colorful "github.com/lucasb-eyer/go-colorful"
 )
 
-// ThemeUpdateMsg is sent when dominant colors are successfully extracted
+// maxArtBytes caps remote album-art downloads.
+const maxArtBytes = 8 << 20
+
+var artClient = &http.Client{Timeout: 4 * time.Second}
+
+// ThemeUpdateMsg is sent when album-art colour extraction finishes.
+// A nil Colors slice means "reset to the default palette".
 type ThemeUpdateMsg struct {
-	Colors []string // Hex colors
+	ArtURL string
+	Colors []string // hex colours, most prominent first
 }
 
-// ExtractColorsCmd returns a tea.Cmd that runs color extraction in the background
+// ExtractColorsCmd returns a tea.Cmd that runs colour extraction in the background.
 func ExtractColorsCmd(artURL string) tea.Cmd {
 	return func() tea.Msg {
-		if artURL == "" {
-			return nil
-		}
+		msg := ThemeUpdateMsg{ArtURL: artURL}
 		img, err := loadArtImage(artURL)
 		if err != nil {
-			return nil // Keep current theme on error
+			return msg
 		}
-		
-		// Extract colors using K-means
-		centroids, err := prominentcolor.Kmeans(img)
-		if err != nil || len(centroids) < 2 {
-			return nil
+		centroids, err := prominentcolor.KmeansWithAll(4, img, prominentcolor.ArgumentDefault,
+			prominentcolor.DefaultSize, prominentcolor.GetDefaultMasks())
+		if err != nil || len(centroids) == 0 {
+			// Fall back to no background masking (e.g. art that is mostly black/white).
+			centroids, err = prominentcolor.KmeansWithAll(4, img, prominentcolor.ArgumentNoCropping,
+				prominentcolor.DefaultSize, nil)
+			if err != nil || len(centroids) == 0 {
+				return msg
+			}
 		}
-
-		colors := make([]string, 0, len(centroids))
 		for _, c := range centroids {
-			colors = append(colors, fmt.Sprintf("#%02x%02x%02x", c.Color.R, c.Color.G, c.Color.B))
+			msg.Colors = append(msg.Colors, fmt.Sprintf("#%02x%02x%02x", c.Color.R, c.Color.G, c.Color.B))
 		}
-		return ThemeUpdateMsg{Colors: colors}
+		return msg
 	}
 }
 
 func loadArtImage(artURL string) (image.Image, error) {
-	if strings.HasPrefix(artURL, "file://") {
-		path := strings.TrimPrefix(artURL, "file://")
-		// Unescape url path (e.g. %20 -> space)
-		unescaped, err := url.QueryUnescape(path)
-		if err == nil {
-			path = unescaped
-		}
+	var r io.Reader
+	if path, ok := fileURLPath(artURL); ok {
 		f, err := os.Open(path)
 		if err != nil {
 			return nil, err
 		}
 		defer f.Close()
-		img, _, err := image.Decode(f)
-		return img, err
-	} else if strings.HasPrefix(artURL, "http://") || strings.HasPrefix(artURL, "https://") {
-		client := &http.Client{Timeout: 3 * time.Second}
-		resp, err := client.Get(artURL)
+		r = f
+	} else if hasHTTPScheme(artURL) {
+		req, err := http.NewRequest(http.MethodGet, artURL, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("User-Agent", userAgent)
+		resp, err := artClient.Do(req)
 		if err != nil {
 			return nil, err
 		}
@@ -73,94 +77,98 @@ func loadArtImage(artURL string) (image.Image, error) {
 		if resp.StatusCode != http.StatusOK {
 			return nil, fmt.Errorf("HTTP error %d", resp.StatusCode)
 		}
-		img, _, err := image.Decode(resp.Body)
-		return img, err
+		r = io.LimitReader(resp.Body, maxArtBytes)
+	} else {
+		return nil, fmt.Errorf("unsupported art URL scheme: %s", artURL)
 	}
-	return nil, fmt.Errorf("unsupported art URL scheme: %s", artURL)
+	img, _, err := image.Decode(r)
+	return img, err
 }
 
-// boostHexColor takes a hex color string and ensures it is highly visible on dark/transparent backgrounds.
-func boostHexColor(hexStr string) string {
-	if !strings.HasPrefix(hexStr, "#") || len(hexStr) != 7 {
-		return hexStr
+// boostHexColor makes a colour vivid and bright enough to read on a dark background.
+func boostHexColor(hex string) string {
+	c, err := colorful.Hex(hex)
+	if err != nil {
+		return hex
 	}
-	r64, err1 := strconv.ParseUint(hexStr[1:3], 16, 8)
-	g64, err2 := strconv.ParseUint(hexStr[3:5], 16, 8)
-	b64, err3 := strconv.ParseUint(hexStr[5:7], 16, 8)
-	if err1 != nil || err2 != nil || err3 != nil {
-		return hexStr
+	h, s, l := c.Hsl()
+	if s < 0.08 {
+		// Near-greyscale art: keep it neutral but light.
+		return colorful.Hsl(h, s, clampF(l, 0.72, 0.85)).Clamped().Hex()
 	}
-
-	r, g, b := uint8(r64), uint8(g64), uint8(b64)
-
-	// Find max channel
-	maxChan := r
-	if g > maxChan {
-		maxChan = g
-	}
-	if b > maxChan {
-		maxChan = b
-	}
-
-	if maxChan == 0 {
-		return "#B4BEFE" // default light lavender
-	}
-
-	// Boost max channel to at least 200 (extra prominent!) for high contrast
-	if maxChan < 200 {
-		scale := 200.0 / float64(maxChan)
-		r = uint8(float64(r) * scale)
-		g = uint8(float64(g) * scale)
-		b = uint8(float64(b) * scale)
-	}
-
-	// Check luminance
-	lum := 0.299*float64(r) + 0.587*float64(g) + 0.114*float64(b)
-	if lum < 140 {
-		// Mix with white by 30% to guarantee readability on dark/transparent backgrounds
-		r = uint8(float64(r) + (255-float64(r))*0.3)
-		g = uint8(float64(g) + (255-float64(g))*0.3)
-		b = uint8(float64(b) + (255-float64(b))*0.3)
-	}
-
-	return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+	s = clampF(s, 0.45, 0.9)
+	l = clampF(l, 0.62, 0.8)
+	return colorful.Hsl(h, s, l).Clamped().Hex()
 }
 
-// UpdateThemeStyles dynamically applies a color palette to Laya's Lipgloss styles and progress bar
-func (m *Model) UpdateThemeStyles(colors []string) {
-	if len(colors) < 2 {
+func clampF(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+// paletteFromColors picks three accents from the extracted colours, preferring
+// colourful ones and keeping primary and secondary visually distinct.
+func paletteFromColors(colors []string) (Palette, bool) {
+	type cc struct {
+		hex string
+		c   colorful.Color
+		sat float64
+	}
+	var cs []cc
+	for _, h := range colors {
+		boosted := boostHexColor(h)
+		c, err := colorful.Hex(boosted)
+		if err != nil {
+			continue
+		}
+		_, s, _ := c.Hsl()
+		cs = append(cs, cc{boosted, c, s})
+	}
+	if len(cs) == 0 {
+		return Palette{}, false
+	}
+	// Most saturated first, stable so prominence breaks ties.
+	sort.SliceStable(cs, func(i, j int) bool { return cs[i].sat > cs[j].sat+0.15 })
+
+	primary := cs[0]
+	secondary := primary
+	for _, c := range cs[1:] {
+		if c.c.DistanceLab(primary.c) > 0.2 {
+			secondary = c
+			break
+		}
+	}
+	if secondary.hex == primary.hex {
+		// Monochrome art: derive the secondary by rotating the hue.
+		h, s, l := primary.c.Hsl()
+		secondary.c = colorful.Hsl(h+40, s, l).Clamped()
+		secondary.hex = secondary.c.Hex()
+	}
+	tertiary := secondary.hex
+	for _, c := range cs {
+		if c.hex != primary.hex && c.hex != secondary.hex {
+			tertiary = c.hex
+			break
+		}
+	}
+	return Palette{Primary: primary.hex, Secondary: secondary.hex, Tertiary: tertiary}, true
+}
+
+// applyTheme rebuilds styles from extracted colours (or the default palette when nil).
+func (m *Model) applyTheme(colors []string) {
+	p, ok := paletteFromColors(colors)
+	if !ok {
+		p = DefaultPalette
+	}
+	if p == m.styles.Palette {
 		return
 	}
-
-	primary := boostHexColor(colors[0])
-	secondary := boostHexColor(colors[1])
-	
-	// Tertiary fallback
-	tertiary := secondary
-	if len(colors) > 2 {
-		tertiary = boostHexColor(colors[2])
-	}
-
-	// Update Lipgloss styles dynamically
-	m.styles.Header = m.styles.Header.Background(lipgloss.Color(primary)).Foreground(lipgloss.Color(ColorBg))
-	m.styles.PlayerName = m.styles.PlayerName.Foreground(lipgloss.Color(secondary))
-	m.styles.SongTitle = m.styles.SongTitle.Foreground(lipgloss.Color(primary))
-	m.styles.TrackCard = m.styles.TrackCard.
-		Border(lipgloss.ThickBorder(), false, false, false, true).
-		BorderForeground(lipgloss.Color(secondary))
-	m.styles.Artist = m.styles.Artist.Foreground(lipgloss.Color(secondary))
-	m.styles.VolumeLabel = m.styles.VolumeLabel.Foreground(lipgloss.Color(secondary))
-	
-	m.styles.HelpText = m.styles.HelpText.Foreground(lipgloss.Color(secondary))
-	m.styles.KeyStyle = m.styles.KeyStyle.Foreground(lipgloss.Color(primary))
-	m.styles.SelectTitle = m.styles.SelectTitle.Foreground(lipgloss.Color(primary))
-	m.styles.SelectActive = m.styles.SelectActive.Foreground(lipgloss.Color(primary))
-	m.styles.LyricsTitle = m.styles.LyricsTitle.Foreground(lipgloss.Color(primary))
-	m.styles.ActiveLyric = m.styles.ActiveLyric.Foreground(lipgloss.Color(primary))
-
-	// Recreate progress bar with new color gradient
-	m.progressBar = progress.New(
-		progress.WithoutPercentage(),
-		progress.WithScaledGradient(primary, tertiary),
-	)
+	m.styles = NewStyles(p)
+	m.progressBar = newProgressBar(p)
+	m.lyricsDirty = true
 }

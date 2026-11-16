@@ -1,33 +1,58 @@
 package ui
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// LyricsMsg is sent when lyrics fetch finishes
+const userAgent = "laya-tui (https://github.com/Sahas001/laya)"
+
+var (
+	// ErrNoLyrics means no lyrics could be found for the track.
+	ErrNoLyrics = errors.New("no lyrics found for this track")
+	// ErrInstrumental means the track is known to be instrumental.
+	ErrInstrumental = errors.New("instrumental track")
+)
+
+// notFoundTTL is how long a "no lyrics" result is cached before retrying LRCLIB.
+const notFoundTTL = 72 * time.Hour
+
+var lyricsClient = &http.Client{Timeout: 15 * time.Second}
+
+// lrclibBase can be overridden in tests.
+var lrclibBase = "https://lrclib.net"
+
+// LyricsMsg is sent when a lyrics lookup finishes.
 type LyricsMsg struct {
-	SongID       string
-	PlainLyrics  string
-	SyncedLyrics string
-	Err          error
+	SongID string
+	Lines  []LyricLine
+	Synced bool
+	Source string // "local file", "cache" or "LRCLIB"
+	Err    error
 }
 
-// LyricLine represents a single line of synced lyrics with its timestamp
+// LyricLine represents a single line of lyrics with its timestamp (0 for plain lyrics).
 type LyricLine struct {
 	Time time.Duration
 	Text string
 }
 
-// LyricResponse represents the response format from LRCLIB
+// LyricResponse represents a track record returned by LRCLIB.
 type LyricResponse struct {
 	ID           int     `json:"id"`
 	TrackName    string  `json:"trackName"`
@@ -39,238 +64,433 @@ type LyricResponse struct {
 	SyncedLyrics string  `json:"syncedLyrics"`
 }
 
-// FetchLyricsCmd returns a tea.Cmd to fetch lyrics in the background
-func FetchLyricsCmd(songID, artist, title, album, trackURL string, duration time.Duration) tea.Cmd {
+// lyricsQuery describes the track we are looking up.
+type lyricsQuery struct {
+	Artist   string
+	Title    string
+	Album    string
+	TrackURL string
+	Duration time.Duration
+}
+
+// cachedLyrics is the on-disk cache record.
+type cachedLyrics struct {
+	Artist       string    `json:"artist"`
+	Title        string    `json:"title"`
+	Synced       string    `json:"synced,omitempty"`
+	Plain        string    `json:"plain,omitempty"`
+	Instrumental bool      `json:"instrumental,omitempty"`
+	NotFound     bool      `json:"not_found,omitempty"`
+	FetchedAt    time.Time `json:"fetched_at"`
+}
+
+// FetchLyricsCmd returns a tea.Cmd that looks up lyrics in the background.
+func FetchLyricsCmd(songID string, q lyricsQuery) tea.Cmd {
 	return func() tea.Msg {
-		plain, synced, err := fetchLyrics(artist, title, album, trackURL, duration)
-		return LyricsMsg{SongID: songID, PlainLyrics: plain, SyncedLyrics: synced, Err: err}
+		lines, synced, source, err := lookupLyrics(q)
+		return LyricsMsg{SongID: songID, Lines: lines, Synced: synced, Source: source, Err: err}
 	}
 }
 
-func findLocalLrc(trackURL string) (string, error) {
-	if !strings.HasPrefix(trackURL, "file://") {
-		return "", fmt.Errorf("not a local file URL")
-	}
-	path := strings.TrimPrefix(trackURL, "file://")
-	// Unescape path (e.g. %20 -> space)
-	unescaped, err := url.QueryUnescape(path)
-	if err == nil {
-		path = unescaped
-	}
+// lookupLyrics tries, in order: a sidecar .lrc next to a local track, the
+// on-disk cache, then LRCLIB. Results from LRCLIB (including misses) are cached.
+func lookupLyrics(q lyricsQuery) ([]LyricLine, bool, string, error) {
+	q.Artist = strings.TrimSpace(q.Artist)
+	q.Title = strings.TrimSpace(q.Title)
+	q.Album = strings.TrimSpace(q.Album)
 
-	// Change extension to .lrc
-	lastDot := strings.LastIndex(path, ".")
-	if lastDot == -1 {
-		return "", fmt.Errorf("no extension found in path")
-	}
-	lrcPath := path[:lastDot] + ".lrc"
-
-	if _, err := os.Stat(lrcPath); err != nil {
-		return "", err
-	}
-
-	content, err := os.ReadFile(lrcPath)
-	if err != nil {
-		return "", err
-	}
-	return string(content), nil
-}
-
-func fetchLyrics(artist, title, album, trackURL string, duration time.Duration) (string, string, error) {
-	artist = strings.TrimSpace(artist)
-	title = strings.TrimSpace(title)
-	album = strings.TrimSpace(album)
-
-	// Stage 0: Try local .lrc file
-	if trackURL != "" {
-		localLrc, err := findLocalLrc(trackURL)
-		if err == nil && localLrc != "" {
-			return "", localLrc, nil
+	if text, err := readSidecarLrc(q.TrackURL); err == nil {
+		if lines, synced := parseLyrics(text, ""); len(lines) > 0 {
+			return lines, synced, "local file", nil
 		}
 	}
 
-	if artist == "" || title == "" {
-		return "", "", fmt.Errorf("artist and track title are required to find lyrics")
+	if q.Title == "" {
+		return nil, false, "", fmt.Errorf("the player did not report a track title")
 	}
 
-	// Stage 1: Try /api/get-cached (Fast, database-only cached search)
-	durationSec := int(duration.Seconds())
-	if album != "" && durationSec > 0 {
-		cachedURL := fmt.Sprintf("https://lrclib.net/api/get-cached?track_name=%s&artist_name=%s&album_name=%s&duration=%d",
-			url.QueryEscape(title),
-			url.QueryEscape(artist),
-			url.QueryEscape(album),
-			durationSec)
-		
-		req, err := http.NewRequest("GET", cachedURL, nil)
-		if err == nil {
-			req.Header.Set("User-Agent", "LayaTUI/1.0.0 (https://github.com/Sahas001/laya-tui)")
-			client := &http.Client{Timeout: 3 * time.Second}
-			resp, err := client.Do(req)
-			if err == nil && resp.StatusCode == http.StatusOK {
-				var result LyricResponse
-				if err := json.NewDecoder(resp.Body).Decode(&result); err == nil {
-					resp.Body.Close()
-					if result.Instrumental {
-						return "", "", fmt.Errorf("instrumental track")
-					}
-					saveLocalLrc(trackURL, result.PlainLyrics, result.SyncedLyrics)
-					return result.PlainLyrics, result.SyncedLyrics, nil
-				}
-				resp.Body.Close()
+	cachePath := lyricsCachePath(q.Artist, q.Title)
+	if c, ok := readCache(cachePath); ok {
+		switch {
+		case c.Instrumental:
+			return nil, false, "cache", ErrInstrumental
+		case c.NotFound && time.Since(c.FetchedAt) < notFoundTTL:
+			return nil, false, "cache", ErrNoLyrics
+		case !c.NotFound:
+			if lines, synced := parseLyrics(c.Synced, c.Plain); len(lines) > 0 {
+				return lines, synced, "cache", nil
 			}
 		}
 	}
 
-	// Stage 2: Fallback to /api/search (Patient, full database search)
-	queryURL := fmt.Sprintf("https://lrclib.net/api/search?track_name=%s&artist_name=%s",
-		url.QueryEscape(title),
-		url.QueryEscape(artist))
-
-	req, err := http.NewRequest("GET", queryURL, nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("User-Agent", "LayaTUI/1.0.0 (https://github.com/Sahas001/laya-tui)")
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to reach lyrics database (timeout): %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("lyrics database returned status %d", resp.StatusCode)
+	rec, err := fetchFromLRCLIB(q)
+	switch {
+	case errors.Is(err, ErrNoLyrics):
+		writeCache(cachePath, cachedLyrics{Artist: q.Artist, Title: q.Title, NotFound: true, FetchedAt: time.Now()})
+		return nil, false, "LRCLIB", err
+	case err != nil:
+		return nil, false, "LRCLIB", err
 	}
 
-	var results []LyricResponse
-	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
-		return "", "", fmt.Errorf("failed to parse lyrics: %w", err)
+	writeCache(cachePath, cachedLyrics{
+		Artist: q.Artist, Title: q.Title,
+		Synced: rec.SyncedLyrics, Plain: rec.PlainLyrics,
+		Instrumental: rec.Instrumental, FetchedAt: time.Now(),
+	})
+	if rec.Instrumental {
+		return nil, false, "LRCLIB", ErrInstrumental
 	}
-
-	if len(results) == 0 {
-		return "", "", fmt.Errorf("no lyrics found for this track")
+	lines, synced := parseLyrics(rec.SyncedLyrics, rec.PlainLyrics)
+	if len(lines) == 0 {
+		return nil, false, "LRCLIB", ErrNoLyrics
 	}
-
-	best := results[0]
-	if best.Instrumental {
-		return "", "", fmt.Errorf("instrumental track")
-	}
-	saveLocalLrc(trackURL, best.PlainLyrics, best.SyncedLyrics)
-	return best.PlainLyrics, best.SyncedLyrics, nil
+	return lines, synced, "LRCLIB", nil
 }
 
-func saveLocalLrc(trackURL, plain, synced string) {
-	if trackURL == "" || !strings.HasPrefix(trackURL, "file://") {
-		return
+// parseLyrics prefers synced LRC and falls back to plain text. If the "synced"
+// text has no timestamps (e.g. a plain .lrc file) it is treated as plain.
+func parseLyrics(synced, plain string) ([]LyricLine, bool) {
+	if strings.TrimSpace(synced) != "" {
+		if lines := ParseSyncedLrc(synced); len(lines) > 0 {
+			return lines, true
+		}
+		if plain == "" {
+			plain = synced
+		}
 	}
-	path := strings.TrimPrefix(trackURL, "file://")
-	unescaped, err := url.QueryUnescape(path)
-	if err == nil {
-		path = unescaped
-	}
-	lastDot := strings.LastIndex(path, ".")
-	if lastDot == -1 {
-		return
-	}
-	lrcPath := path[:lastDot] + ".lrc"
-
-	// Prefer synced lyrics
-	content := synced
-	if content == "" {
-		content = plain
-	}
-	if content == "" {
-		return
-	}
-
-	_ = os.WriteFile(lrcPath, []byte(content), 0644)
+	return ParsePlainLrc(plain), false
 }
 
-// ParseSyncedLrc parses LRC synced lyrics into a structured slice of LyricLines sorted chronologically
-func ParseSyncedLrc(lrc string) []LyricLine {
-	var lines []LyricLine
-	rawLines := strings.Split(lrc, "\n")
-	for _, rawLine := range rawLines {
-		rawLine = strings.TrimSpace(rawLine)
-		if rawLine == "" {
+// fetchFromLRCLIB queries the cached signature endpoint first, then falls back
+// to a search (with cleaned-up title/artist for browser playback).
+func fetchFromLRCLIB(q lyricsQuery) (*LyricResponse, error) {
+	durationSec := int(math.Round(q.Duration.Seconds()))
+
+	if q.Artist != "" && q.Album != "" && durationSec > 0 {
+		params := url.Values{
+			"track_name":  {q.Title},
+			"artist_name": {q.Artist},
+			"album_name":  {q.Album},
+			"duration":    {strconv.Itoa(durationSec)},
+		}
+		var rec LyricResponse
+		if status, err := getJSON(lrclibBase+"/api/get-cached?"+params.Encode(), &rec, 4*time.Second); err == nil && status == http.StatusOK {
+			return &rec, nil
+		}
+	}
+
+	var lastErr error = ErrNoLyrics
+	for _, sq := range searchVariants(q.Artist, q.Title) {
+		params := url.Values{"track_name": {sq.title}}
+		if sq.artist != "" {
+			params.Set("artist_name", sq.artist)
+		}
+		var results []LyricResponse
+		status, err := getJSON(lrclibBase+"/api/search?"+params.Encode(), &results, 0)
+		if err != nil {
+			lastErr = fmt.Errorf("could not reach LRCLIB: %w", err)
 			continue
 		}
-
-		// A line can have multiple timestamps, e.g. [00:12.34][00:15.00]Text
-		temp := rawLine
-		var timestamps []time.Duration
-		for {
-			if !strings.HasPrefix(temp, "[") {
-				break
-			}
-			endIdx := strings.Index(temp, "]")
-			if endIdx == -1 {
-				break
-			}
-
-			tsStr := temp[1:endIdx]
-			d, err := parseTimestamp(tsStr)
-			if err == nil {
-				timestamps = append(timestamps, d)
-			}
-			temp = temp[endIdx+1:]
+		if status != http.StatusOK {
+			lastErr = fmt.Errorf("LRCLIB returned HTTP %d", status)
+			continue
 		}
+		if best := pickBestResult(results, sq.title, q.Duration); best != nil {
+			return best, nil
+		}
+	}
+	return nil, lastErr
+}
 
-		text := strings.TrimSpace(temp)
-		for _, ts := range timestamps {
-			lines = append(lines, LyricLine{
-				Time: ts,
-				Text: text,
-			})
+func getJSON(u string, v any, timeout time.Duration) (int, error) {
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("User-Agent", userAgent)
+	client := lyricsClient
+	if timeout > 0 {
+		c := *lyricsClient
+		c.Timeout = timeout
+		client = &c
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return resp.StatusCode, nil
+	}
+	return resp.StatusCode, json.NewDecoder(resp.Body).Decode(v)
+}
+
+// pickBestResult ranks search results: synced lyrics, close duration and an
+// exact title match are preferred. Instrumental records only win if nothing else exists.
+func pickBestResult(results []LyricResponse, title string, duration time.Duration) *LyricResponse {
+	if len(results) == 0 {
+		return nil
+	}
+	score := func(r LyricResponse) float64 {
+		s := 0.0
+		if r.Instrumental {
+			s -= 100
+		}
+		if r.SyncedLyrics != "" {
+			s += 10
+		} else if r.PlainLyrics != "" {
+			s += 4
+		}
+		if strings.EqualFold(strings.TrimSpace(r.TrackName), strings.TrimSpace(title)) {
+			s += 3
+		}
+		if duration > 0 && r.Duration > 0 {
+			diff := math.Abs(r.Duration - duration.Seconds())
+			switch {
+			case diff <= 2:
+				s += 8
+			case diff <= 5:
+				s += 4
+			case diff > 20:
+				s -= 6
+			}
+		}
+		return s
+	}
+	best := 0
+	for i := 1; i < len(results); i++ {
+		if score(results[i]) > score(results[best]) {
+			best = i
+		}
+	}
+	r := results[best]
+	if !r.Instrumental && r.SyncedLyrics == "" && r.PlainLyrics == "" {
+		return nil
+	}
+	return &r
+}
+
+type searchQuery struct{ artist, title string }
+
+var (
+	noiseBrackets = regexp.MustCompile(`(?i)\s*[\(\[][^\)\]]*\b(official|video|audio|lyrics?|visuali[sz]er|remaster(ed)?|hd|4k|mv|live|explicit|clean)\b[^\)\]]*[\)\]]`)
+	featSuffix    = regexp.MustCompile(`(?i)\s+(feat\.?|ft\.?|featuring)\s+.*$`)
+	remasterTail  = regexp.MustCompile(`(?i)\s+-\s+(\d{4}\s+)?remaster(ed)?.*$`)
+)
+
+// cleanTitle strips decorations that browsers/YouTube add to track titles.
+func cleanTitle(s string) string {
+	s = noiseBrackets.ReplaceAllString(s, "")
+	s = remasterTail.ReplaceAllString(s, "")
+	s = featSuffix.ReplaceAllString(s, "")
+	return strings.TrimSpace(s)
+}
+
+// cleanArtist strips YouTube "- Topic" / "VEVO" channel suffixes.
+func cleanArtist(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, " - Topic")
+	s = strings.TrimSuffix(s, "VEVO")
+	return strings.TrimSpace(s)
+}
+
+// searchVariants returns de-duplicated (artist, title) pairs to try in order.
+func searchVariants(artist, title string) []searchQuery {
+	var out []searchQuery
+	seen := map[searchQuery]bool{}
+	add := func(a, t string) {
+		q := searchQuery{strings.TrimSpace(a), strings.TrimSpace(t)}
+		if q.title == "" || seen[q] {
+			return
+		}
+		seen[q] = true
+		out = append(out, q)
+	}
+	add(artist, title)
+	ca, ct := cleanArtist(artist), cleanTitle(title)
+	add(ca, ct)
+	// "Artist - Title" style titles (YouTube) when the artist is missing or a channel name.
+	if parts := strings.SplitN(ct, " - ", 2); len(parts) == 2 {
+		add(parts[0], cleanTitle(parts[1]))
+	}
+	return out
+}
+
+// --- local files & cache ---
+
+// fileURLPath converts a file:// URL to a filesystem path.
+func fileURLPath(raw string) (string, bool) {
+	if !strings.HasPrefix(raw, "file://") {
+		return "", false
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Path == "" {
+		return "", false
+	}
+	return u.Path, true
+}
+
+func hasHTTPScheme(raw string) bool {
+	return strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://")
+}
+
+// readSidecarLrc reads "<track>.lrc" next to a local audio file.
+func readSidecarLrc(trackURL string) (string, error) {
+	path, ok := fileURLPath(trackURL)
+	if !ok {
+		return "", fmt.Errorf("not a local file")
+	}
+	ext := filepath.Ext(path)
+	if ext == "" {
+		return "", fmt.Errorf("no extension found in path")
+	}
+	b, err := os.ReadFile(strings.TrimSuffix(path, ext) + ".lrc")
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func lyricsCacheDir() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "laya", "lyrics")
+}
+
+func lyricsCachePath(artist, title string) string {
+	dir := lyricsCacheDir()
+	if dir == "" {
+		return ""
+	}
+	sum := sha1.Sum([]byte(strings.ToLower(artist) + "\x1f" + strings.ToLower(title)))
+	return filepath.Join(dir, hex.EncodeToString(sum[:10])+".json")
+}
+
+func readCache(path string) (cachedLyrics, bool) {
+	var c cachedLyrics
+	if path == "" {
+		return c, false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return c, false
+	}
+	if json.Unmarshal(b, &c) != nil {
+		return c, false
+	}
+	return c, true
+}
+
+func writeCache(path string, c cachedLyrics) {
+	if path == "" {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		return
+	}
+	tmp := path + ".tmp"
+	if os.WriteFile(tmp, b, 0o644) == nil {
+		_ = os.Rename(tmp, path)
+	}
+}
+
+// --- LRC parsing ---
+
+var wordTimestamp = regexp.MustCompile(`<\d+:\d+(?:[.:]\d+)?>`)
+
+// ParseSyncedLrc parses LRC synced lyrics into LyricLines sorted chronologically.
+// It supports multiple timestamps per line, [mm:ss], [mm:ss.xx], [mm:ss:xx],
+// the [offset:±ms] tag and strips enhanced-LRC word timestamps.
+func ParseSyncedLrc(lrc string) []LyricLine {
+	var lines []LyricLine
+	var offset time.Duration
+
+	for _, raw := range strings.Split(lrc, "\n") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		temp := raw
+		var stamps []time.Duration
+		for strings.HasPrefix(temp, "[") {
+			end := strings.Index(temp, "]")
+			if end == -1 {
+				break
+			}
+			tag := temp[1:end]
+			if d, err := parseTimestamp(tag); err == nil {
+				stamps = append(stamps, d)
+			} else if v, ok := strings.CutPrefix(strings.ToLower(tag), "offset:"); ok {
+				if ms, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+					// Positive offset means lyrics should appear sooner.
+					offset = time.Duration(ms) * time.Millisecond
+				}
+			}
+			temp = temp[end+1:]
+		}
+		text := strings.TrimSpace(wordTimestamp.ReplaceAllString(temp, ""))
+		text = strings.Join(strings.Fields(text), " ")
+		for _, ts := range stamps {
+			lines = append(lines, LyricLine{Time: ts, Text: text})
 		}
 	}
 
-	// Sort lines by timestamp
-	sort.Slice(lines, func(i, j int) bool {
-		return lines[i].Time < lines[j].Time
-	})
-
+	if offset != 0 {
+		for i := range lines {
+			lines[i].Time -= offset
+			if lines[i].Time < 0 {
+				lines[i].Time = 0
+			}
+		}
+	}
+	sort.SliceStable(lines, func(i, j int) bool { return lines[i].Time < lines[j].Time })
 	return lines
 }
 
+// parseTimestamp parses mm:ss, mm:ss.xx(x) or mm:ss:xx.
 func parseTimestamp(s string) (time.Duration, error) {
-	// LRC timestamps can be MM:SS.xx or MM:SS
 	parts := strings.Split(s, ":")
-	if len(parts) != 2 {
-		return 0, fmt.Errorf("invalid timestamp format")
+	if len(parts) < 2 || len(parts) > 3 {
+		return 0, fmt.Errorf("invalid timestamp %q", s)
 	}
-
-	minStr := parts[0]
+	min, err := strconv.Atoi(parts[0])
+	if err != nil || min < 0 {
+		return 0, fmt.Errorf("invalid minutes in %q", s)
+	}
 	secStr := parts[1]
-
-	var min int
-	if _, err := fmt.Sscanf(minStr, "%d", &min); err != nil {
-		return 0, err
+	if len(parts) == 3 {
+		secStr += "." + parts[2]
 	}
-
-	var sec float64
-	if _, err := fmt.Sscanf(secStr, "%f", &sec); err != nil {
-		return 0, err
+	sec, err := strconv.ParseFloat(secStr, 64)
+	if err != nil || sec < 0 || sec >= 60 {
+		return 0, fmt.Errorf("invalid seconds in %q", s)
 	}
-
-	totalSec := float64(min)*60 + sec
-	return time.Duration(totalSec * float64(time.Second)), nil
+	ms := math.Round(sec * 1000)
+	return time.Duration(min)*time.Minute + time.Duration(ms)*time.Millisecond, nil
 }
 
-// ParsePlainLrc converts plain lyrics text into a structured slice of LyricLines without timestamps
+// ParsePlainLrc converts plain lyrics text into LyricLines without timestamps.
+// Single blank lines are kept as stanza breaks.
 func ParsePlainLrc(plain string) []LyricLine {
 	var lines []LyricLine
-	rawLines := strings.Split(plain, "\n")
-	for _, rawLine := range rawLines {
-		rawLine = strings.TrimSpace(rawLine)
-		if rawLine != "" {
-			lines = append(lines, LyricLine{
-				Time: 0,
-				Text: rawLine,
-			})
+	blank := false
+	for _, raw := range strings.Split(plain, "\n") {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			blank = len(lines) > 0
+			continue
 		}
+		if blank {
+			lines = append(lines, LyricLine{})
+			blank = false
+		}
+		lines = append(lines, LyricLine{Text: raw})
 	}
 	return lines
 }

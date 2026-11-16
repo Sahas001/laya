@@ -4,301 +4,364 @@ import (
 	"fmt"
 	"math"
 	"strings"
-	"time"
 
+	"github.com/Sahas001/laya/internal/format"
+	"github.com/Sahas001/laya/mpris"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
-// formatDuration converts a time.Duration to a MM:SS or HH:MM:SS string.
-func formatDuration(d time.Duration) string {
-	if d < 0 {
-		return "00:00"
+// truncate shortens s to fit within width terminal cells.
+func truncate(s string, width int) string {
+	if width <= 0 {
+		return ""
 	}
-	d = d.Round(time.Second)
-	h := d / time.Hour
-	d -= h * time.Hour
-	m := d / time.Minute
-	d -= m * time.Minute
-	s := d / time.Second
-
-	if h > 0 {
-		return fmt.Sprintf("%02d:%02d:%02d", h, m, s)
-	}
-	return fmt.Sprintf("%02d:%02d", m, s)
+	return ansi.Truncate(s, width, "…")
 }
 
-// renderVolumeBar returns a character-based volume bar.
-func renderVolumeBar(vol float64, width int) string {
-	filled := int(vol * float64(width))
-	if filled > width {
-		filled = width
-	} else if filled < 0 {
-		filled = 0
-	}
-	empty := width - filled
-	return strings.Repeat("■", filled) + strings.Repeat("□", empty)
+// frame accumulates rendered sections and tracks the current row so that
+// clickable regions can be located later.
+type frame struct {
+	parts []string
+	rows  int
 }
 
-func (m *Model) viewDashboard(styles Styles) string {
-	boxWidth := 56
-	if m.width > 0 && m.width < boxWidth+6 {
-		boxWidth = m.width - 6
-		if boxWidth < 26 {
-			boxWidth = 26
-		}
+func (f *frame) add(s string) {
+	f.parts = append(f.parts, s)
+	f.rows += lipgloss.Height(s)
+}
+
+func (f *frame) blank() { f.add("") }
+
+func (f *frame) String() string { return strings.Join(f.parts, "\n") }
+
+// boxOffsetX is the box chrome before content: rounded border (1) + left padding (2).
+const boxOffsetX = 3
+
+// compact reports whether the terminal is too short for the roomy layout.
+func (m *Model) compact() bool { return m.height > 0 && m.height < 22 }
+
+// container returns the outer box style, without vertical padding in compact mode.
+func (m *Model) container(box int) lipgloss.Style {
+	st := m.styles.Container.Width(box)
+	if m.compact() {
+		st = st.Padding(0, 2)
 	}
-	contentWidth := boxWidth - 6
+	return st
+}
 
-	var sb strings.Builder
+// boxOffsetY is the box chrome above content: border (1) + top padding.
+func (m *Model) boxOffsetY() int {
+	if m.compact() {
+		return 1
+	}
+	return 2
+}
 
-	// 1. Header (Application Name & Selected Player)
-	headerText := styles.Header.Margin(0).Render(" L A Y A ")
-	centeredHeader := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(headerText)
-	sb.WriteString(centeredHeader)
-	sb.WriteString("\n")
+func (m *Model) viewHeader(f *frame, inner int) {
+	s := m.styles
+	center := lipgloss.NewStyle().Width(inner).Align(lipgloss.Center)
+	f.add(center.Render(s.Header.Render("L A Y A")))
 
-	playerText := styles.PlayerName.Render(fmt.Sprintf("● %s", m.activePlayerName))
-	centeredPlayer := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(playerText)
-	sb.WriteString(centeredPlayer)
-	sb.WriteString("\n\n")
+	if m.playerName == "" {
+		return
+	}
+	dot := s.DotStopped.Render("●")
+	switch m.state.PlaybackStatus {
+	case mpris.StatusPlaying:
+		dot = s.DotPlaying.Render("●")
+	case mpris.StatusPaused:
+		dot = s.DotPaused.Render("●")
+	}
 
-	// 2. Main content area (either Track Details or Lyrics)
-	if m.showLyrics {
-		// --- LYRICS VIEW ---
-		title := m.playerState.Metadata.Title
-		artist := m.playerState.Metadata.Artist
-		if title == "" {
-			title = "Unknown Track"
-		}
-
-		lyricHeader := fmt.Sprintf("󰎆 Lyrics: %s - %s", title, artist)
-		lyricHeaderStyle := styles.LyricsTitle.Width(contentWidth).Align(lipgloss.Center)
-		sb.WriteString(lyricHeaderStyle.Render(lyricHeader))
-		sb.WriteString("\n\n")
-
-		if !m.lyricsLoaded {
-			var loadingStr string
-			if m.lyricsErr != nil {
-				loadingStr = styles.LyricsError.Render(fmt.Sprintf("Error: %v", m.lyricsErr))
-			} else {
-				loadingStr = styles.LyricsLoading.Render("Loading lyrics from LRCLIB...")
+	var ind []string
+	if m.hasState {
+		if m.state.HasShuffle {
+			st := s.IndicatorOff
+			if m.state.Shuffle {
+				st = s.IndicatorOn
 			}
-			centeredLoading := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(loadingStr)
-			sb.WriteString(centeredLoading)
-		} else {
-			sb.WriteString(m.viewport.View())
+			ind = append(ind, st.Render("󰒟"))
 		}
-		sb.WriteString("\n\n")
+		switch m.state.LoopStatus {
+		case mpris.LoopPlaylist:
+			ind = append(ind, s.IndicatorOn.Render("󰑖"))
+		case mpris.LoopTrack:
+			ind = append(ind, s.IndicatorOn.Render("󰑘"))
+		case mpris.LoopNone:
+			ind = append(ind, s.IndicatorOff.Render("󰑗"))
+		}
+		if r := m.state.Rate; r > 0 && math.Abs(r-1) > 0.01 {
+			ind = append(ind, s.IndicatorOn.Render(fmt.Sprintf("%.2g×", r)))
+		}
+	}
+	indicators := ""
+	if len(ind) > 0 {
+		indicators = "   " + strings.Join(ind, " ")
+	}
+	name := truncate(m.playerName, inner-4-lipgloss.Width(indicators))
+	f.add(center.Render(dot + " " + s.PlayerName.Render(name) + indicators))
+}
+
+func (m *Model) viewFooter(f *frame, inner int) {
+	s := m.styles
+	center := lipgloss.NewStyle().Width(inner).Align(lipgloss.Center)
+
+	// Toast line is always reserved so the layout doesn't jump.
+	toast := ""
+	if m.toast != "" {
+		st := s.Toast
+		if m.toastErr {
+			st = s.ToastErr
+		}
+		toast = st.Render(truncate(m.toast, inner))
+	}
+	f.add(center.Render(toast))
+
+	var hints []hint
+	switch {
+	case m.showHelp:
+		hints = []hint{{"esc", "close help", 0}, {"q", "quit", 1}}
+	case m.showLyrics:
+		hints = []hint{{"␣", "play/pause", 1}, {"j/k", "scroll", 2}, {"</>", "timing", 4},
+			{"l", "back", 0}, {"?", "help", 0}, {"q", "quit", 3}}
+	default:
+		hints = []hint{{"␣", "play/pause", 1}, {"←/→", "skip", 4}, {"l", "lyrics", 2},
+			{"s", "players", 3}, {"?", "help", 0}, {"q", "quit", 2}}
+	}
+	f.add(center.Render(m.renderHints(hints, inner)))
+}
+
+// hint is a footer key hint; lower prio values are kept longest when space is short.
+type hint struct {
+	key, desc string
+	prio      int
+}
+
+// renderHints joins hints with separators, dropping the least important ones
+// until the line fits within width (display order is preserved).
+func (m *Model) renderHints(hints []hint, width int) string {
+	s := m.styles
+	sep := s.HelpText.Render(" · ")
+	render := func(hs []hint) string {
+		parts := make([]string, len(hs))
+		for i, h := range hs {
+			parts[i] = s.HelpKey.Render(h.key) + " " + s.HelpText.Render(h.desc)
+		}
+		return strings.Join(parts, sep)
+	}
+	hs := append([]hint(nil), hints...)
+	for len(hs) > 1 && lipgloss.Width(render(hs)) > width {
+		worst := 0
+		for i, h := range hs {
+			if h.prio >= hs[worst].prio {
+				worst = i
+			}
+		}
+		hs = append(hs[:worst], hs[worst+1:]...)
+	}
+	return render(hs)
+}
+
+func (m *Model) viewDashboard() string {
+	box, inner := m.layout()
+	m.progressHit = hitBox{}
+
+	var f frame
+	m.viewHeader(&f, inner)
+	f.blank()
+
+	switch {
+	case m.showHelp:
+		f.add(m.viewHelp(inner))
+	case m.showLyrics:
+		f.add(m.viewLyrics(inner))
+	default:
+		m.viewNowPlaying(&f, inner)
+	}
+
+	if !m.compact() {
+		f.blank()
+	}
+	m.viewFooter(&f, inner)
+	return m.container(box).Render(f.String())
+}
+
+func (m *Model) viewNowPlaying(f *frame, inner int) {
+	s := m.styles
+	center := lipgloss.NewStyle().Width(inner).Align(lipgloss.Center)
+	meta := m.state.Metadata
+
+	// Track card.
+	title, artist, album := meta.Title, meta.Artist, meta.Album
+	if title == "" {
+		if !m.hasState {
+			title, artist = "Connecting…", ""
+		} else {
+			title = "Nothing playing"
+			artist = "Start something in " + m.playerName
+		}
+		album = ""
+	}
+
+	showViz := inner >= 46
+	vizWidth := 0
+	if showViz {
+		vizWidth = numVizBars*2 - 1 + 4 // bars + gaps + padding + border
+	}
+	cardWidth := inner
+	if showViz {
+		cardWidth = inner - vizWidth - 2
+	}
+	textWidth := cardWidth - 3 // left border + padding
+
+	var card []string
+	card = append(card, s.SongTitle.Width(textWidth).MaxHeight(2).Render(title))
+	if artist != "" {
+		card = append(card, s.Artist.Render(truncate("󰠃  "+artist, textWidth)))
+	}
+	if album != "" {
+		card = append(card, s.Album.Render(truncate("󰀥  "+album, textWidth)))
+	}
+	trackCard := s.TrackCard.Width(cardWidth - 1).Render(strings.Join(card, "\n"))
+
+	if showViz {
+		f.add(lipgloss.JoinHorizontal(lipgloss.Center, trackCard, "  ", m.viewVisualizer()))
 	} else {
-		// --- NOW PLAYING DASHBOARD ---
-		title := m.playerState.Metadata.Title
-		artist := m.playerState.Metadata.Artist
-		album := m.playerState.Metadata.Album
-
-		if title == "" {
-			title = "No media detected"
-			artist = "Start playing something on your media player"
-			album = ""
-		}
-
-		// Track Info Card (wrapped to fit contentWidth)
-		var cardSb strings.Builder
-		cardSb.WriteString(styles.SongTitle.Render(title))
-		cardSb.WriteString("\n")
-		if artist != "" {
-			cardSb.WriteString(styles.Artist.Render("  " + artist))
-			cardSb.WriteString("\n")
-		}
-		if album != "" {
-			cardSb.WriteString(styles.Album.Render("󰀥  " + album))
-			cardSb.WriteString("\n")
-		}
-
-		var mainContent string
-		if contentWidth >= 40 {
-			// Show both track card and wave visualizer side-by-side
-			cardWidth := contentWidth - 23
-			if cardWidth < 15 {
-				cardWidth = 15
-			}
-			trackCardStyle := styles.TrackCard.Width(cardWidth)
-			trackCard := trackCardStyle.Render(cardSb.String())
-			visualizerView := m.getVisualizerView(styles)
-			mainContent = lipgloss.JoinHorizontal(lipgloss.Top, trackCard, "   ", visualizerView)
-		} else {
-			// Small screen: show track card only
-			trackCardStyle := styles.TrackCard.Width(contentWidth - 2)
-			mainContent = trackCardStyle.Render(cardSb.String())
-		}
-		sb.WriteString(mainContent)
-		sb.WriteString("\n")
-
-		// 3. Progress Bar Row
-		duration := m.playerState.Metadata.Length
-		posStr := formatDuration(m.interpolatedPos)
-		durStr := "--:--"
-
-		var percent float64
-		if duration > 0 {
-			durStr = formatDuration(duration)
-			percent = float64(m.interpolatedPos) / float64(duration)
-			if percent > 1.0 {
-				percent = 1.0
-			} else if percent < 0.0 {
-				percent = 0.0
-			}
-		} else {
-			// Live stream or unknown duration
-			if m.playerState.PlaybackStatus == "Playing" {
-				percent = 0.5 // Static centered progress indicator
-				durStr = "Live"
-			}
-		}
-
-		// Progress bar width adjusted based on contentWidth
-		progWidth := contentWidth - len(posStr) - len(durStr) - 4
-		if progWidth < 6 {
-			progWidth = 6
-		}
-		m.progressBar.Width = progWidth
-		progressBarStr := m.progressBar.ViewAs(percent)
-
-		progRow := fmt.Sprintf("%s  %s  %s",
-			styles.ProgressTime.Render(posStr),
-			progressBarStr,
-			styles.ProgressTime.Render(durStr),
-		)
-		centeredProg := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(progRow)
-		sb.WriteString(centeredProg)
-		sb.WriteString("\n\n")
-
-		// 4. Status Bar & Volume Row
-		var statusBadge string
-		switch m.playerState.PlaybackStatus {
-		case "Playing":
-			statusBadge = styles.StatusPlaying.Render(" PLAYING")
-		case "Paused":
-			statusBadge = styles.StatusPaused.Render("⏸ PAUSED")
-		default:
-			statusBadge = styles.StatusStopped.Render("⏹ STOPPED")
-		}
-
-		volPercent := m.playerState.Volume
-		volStr := fmt.Sprintf("󰕾 %3d%% ", int(volPercent*100))
-		volBarWidth := 10
-		if contentWidth < 40 {
-			volBarWidth = 5
-		}
-		volBar := renderVolumeBar(volPercent, volBarWidth)
-		volRow := fmt.Sprintf("%s%s",
-			styles.VolumeLabel.Render(volStr),
-			styles.VolumeValue.Render(volBar),
-		)
-
-		// Join status and volume side-by-side with padding
-		statusBar := lipgloss.JoinHorizontal(lipgloss.Center, statusBadge, "    ", volRow)
-		centeredStatus := lipgloss.NewStyle().Width(contentWidth).Align(lipgloss.Center).Render(statusBar)
-		sb.WriteString(centeredStatus)
-		sb.WriteString("\n")
+		f.add(trackCard)
 	}
+	f.blank()
 
-	// 5. Help Hint Footer
-	sb.WriteString("\n")
-	var helpKeys string
-	if !m.showHelp {
-		helpKeys = "space: play/pause  •  h: help"
-	} else if m.showLyrics {
-		helpKeys = "j/k: scroll  •  space: play/pause  •  [ and ]: seek  •  H/L: cycle players  •  l/esc: close lyrics  •  h: hide/help"
-	} else {
-		helpKeys = "space: play/pause  •  [/]: seek  •  H/L: cycle players  •  l: lyrics  •  s: select player  •  h: hide help"
+	// Progress row.
+	length := meta.Length
+	posStr := format.Duration(m.pos)
+	var durStr string
+	var percent float64
+	live := false
+	switch {
+	case length > 0:
+		durStr = format.Duration(length)
+		percent = format.Clamp01(float64(m.pos) / float64(length))
+	case m.hasState && meta.Title != "" && m.state.PlaybackStatus != mpris.StatusStopped:
+		live = true
+		durStr = s.LiveBadge.Render("● LIVE")
+	default:
+		durStr = "--:--"
 	}
-	wrappedHelp := styles.HelpText.Width(contentWidth).Align(lipgloss.Center).Render(helpKeys)
-	sb.WriteString(wrappedHelp)
+	if !m.hasState || meta.Title == "" {
+		posStr = "--:--"
+	}
+	posR := s.ProgressTime.Render(posStr)
+	durR := durStr
+	if !live {
+		durR = s.ProgressTime.Render(durStr)
+	}
+	barWidth := inner - lipgloss.Width(posR) - lipgloss.Width(durR) - 4
+	if barWidth < 4 {
+		barWidth = 4
+	}
+	m.progressBar.Width = barWidth
+	bar := m.progressBar.ViewAs(percent)
+	barX := lipgloss.Width(posR) + 2
+	if length > 0 && m.state.CanSeek {
+		m.progressHit = hitBox{
+			x0: boxOffsetX + barX,
+			x1: boxOffsetX + barX + barWidth,
+			y:  m.boxOffsetY() + f.rows,
+			ok: true,
+		}
+	}
+	f.add(posR + "  " + bar + "  " + durR)
+	f.blank()
 
-	containerStyle := styles.Container.Width(boxWidth)
-	return containerStyle.Render(sb.String())
+	// Status + volume row.
+	var badge string
+	switch m.state.PlaybackStatus {
+	case mpris.StatusPlaying:
+		badge = s.StatusPlaying.Render("▶ PLAYING")
+	case mpris.StatusPaused:
+		badge = s.StatusPaused.Render("⏸ PAUSED")
+	default:
+		badge = s.StatusStopped.Render("⏹ STOPPED")
+	}
+	row := badge
+	if m.state.HasVolume {
+		row = lipgloss.JoinHorizontal(lipgloss.Center, badge, "     ", m.viewVolume(inner))
+	}
+	f.add(center.Render(row))
 }
 
-// getVisualizerView renders a 3-row, 6-bar bouncing audio wave visualizer inside a box.
-func (m *Model) getVisualizerView(styles Styles) string {
-	numBars := 6
-	var heights []int
+func (m *Model) viewVolume(inner int) string {
+	s := m.styles
+	vol := format.Clamp01(m.state.Volume)
+	icon := "󰕾"
+	switch {
+	case vol <= 0.001:
+		icon = "󰖁"
+	case vol < 0.34:
+		icon = "󰕿"
+	case vol < 0.67:
+		icon = "󰖀"
+	}
+	width := 12
+	if inner < 46 {
+		width = 6
+	}
+	filled := format.FineBar(vol, width, "")
+	empty := strings.Repeat("─", width-lipgloss.Width(filled))
+	return s.VolumeLabel.Render(fmt.Sprintf("%s %3d%%", icon, int(math.Round(vol*100)))) + " " +
+		s.VolumeValue.Render(filled) + s.VolumeTrack.Render(empty)
+}
 
-	playing := m.player != nil && m.playerState.PlaybackStatus == "Playing"
+// --- visualizer ---
 
+var vizLevels = []string{" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"}
+
+// animateViz moves the bars towards a pseudo-random wave while playing and
+// lets them settle when paused.
+func (m *Model) animateViz() {
+	playing := m.player != nil && m.state.PlaybackStatus == mpris.StatusPlaying
 	if playing {
-		// Combine sine/cosine waves for organic equalizer movement
-		angle := float64(m.recordFrame) * 0.8
-		for i := 0; i < numBars; i++ {
-			val := 3.0 + 2.2*math.Sin(angle+float64(i)*1.2) + 0.8*math.Cos(angle*1.8+float64(i)*2.0)
-			h := int(val)
-			if h < 0 {
-				h = 0
-			}
-			if h > 6 {
-				h = 6
-			}
-			heights = append(heights, h)
-		}
-	} else {
-		// Idle state: flat wave at height 1 (just the bottom row has '▄')
-		for i := 0; i < numBars; i++ {
-			heights = append(heights, 1)
-		}
+		m.vizPhase += 0.21
 	}
-
-	// Styles for gradient
-	// Bottom: Blue/Tertiary, Middle: Secondary, Top: Primary (Peaks)
-	topStyle := styles.SongTitle  // Primary
-	midStyle := styles.PlayerName  // Secondary
-	botStyle := styles.VolumeLabel // Blue/Tertiary
-
-	var topRow, midRow, botRow strings.Builder
-
-	for i := 0; i < numBars; i++ {
-		h := heights[i]
-		var t, md, b string
-
-		switch h {
-		case 1:
-			t, md, b = " ", " ", "▄"
-		case 2:
-			t, md, b = " ", " ", "█"
-		case 3:
-			t, md, b = " ", "▄", "█"
-		case 4:
-			t, md, b = " ", "█", "█"
-		case 5:
-			t, md, b = "▄", "█", "█"
-		case 6:
-			t, md, b = "█", "█", "█"
-		default:
-			t, md, b = " ", " ", " "
+	for i := range m.viz {
+		target := 1.0
+		ease := 0.12
+		if playing {
+			fi := float64(i)
+			p := m.vizPhase
+			target = 12 + 6.5*math.Sin(p+fi*0.9) + 4*math.Sin(p*1.73+fi*2.3) + 2.5*math.Sin(p*3.1+fi*0.55)
+			target = math.Max(2, math.Min(24, target))
+			ease = 0.45
 		}
-
-		// Apply styles
-		tRendered := topStyle.Render(t)
-		mdRendered := midStyle.Render(md)
-		bRendered := botStyle.Render(b)
-
-		if i > 0 {
-			topRow.WriteString(" ")
-			midRow.WriteString(" ")
-			botRow.WriteString(" ")
-		}
-		topRow.WriteString(tRendered)
-		midRow.WriteString(mdRendered)
-		botRow.WriteString(bRendered)
+		m.viz[i] += (target - m.viz[i]) * ease
 	}
+}
 
-	// Combine rows
-	content := fmt.Sprintf("%s\n%s\n%s", topRow.String(), midRow.String(), botRow.String())
+func (m *Model) viewVisualizer() string {
+	s := m.styles
+	rowsStyles := []struct {
+		st   lipgloss.Style
+		base int
+	}{{s.VizTop, 16}, {s.VizMid, 8}, {s.VizBot, 0}}
 
-	// Wrap in a styled box
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color(ColorBase)).
-		Padding(0, 1)
-
-	return boxStyle.Render(content)
+	lines := make([]string, len(rowsStyles))
+	for r, rs := range rowsStyles {
+		var sb strings.Builder
+		for i, h := range m.viz {
+			if i > 0 {
+				sb.WriteByte(' ')
+			}
+			lvl := int(math.Round(h)) - rs.base
+			if lvl < 0 {
+				lvl = 0
+			}
+			if lvl > 8 {
+				lvl = 8
+			}
+			sb.WriteString(vizLevels[lvl])
+		}
+		lines[r] = rs.st.Render(sb.String())
+	}
+	return s.VizBorder.Render(strings.Join(lines, "\n"))
 }
